@@ -1,0 +1,8 @@
+# Local source build only. Base compose.yaml is image-only for servers.
+# Set SAKURA_IMAGE=sakura-statistics-gateway:local in your local .env first.
+services:
+  app:
+    image: sakura-statistics-gateway:local
+    build:
+      context: .
+      dockerfile: Dockerfile

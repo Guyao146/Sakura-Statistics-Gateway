@@ -1,0 +1,17 @@
+.git
+.env
+.env.*
+!.env.example
+**/node_modules
+**/dist
+**/__pycache__
+**/*.pyc
+**/*.sqlite*
+**/*.db
+backups
+*.dump
+*.sql
+!backend/migrations/*.sql
+.tools
+compose.dev.yaml
+.zcode

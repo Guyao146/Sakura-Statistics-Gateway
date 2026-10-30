@@ -1,0 +1,11 @@
+CREATE TABLE IF NOT EXISTS admins (username text PRIMARY KEY, password_hash text NOT NULL);
+CREATE TABLE IF NOT EXISTS auth_sessions (token_hash text PRIMARY KEY, username text NOT NULL REFERENCES admins(username), expires_at timestamptz NOT NULL);
+CREATE INDEX IF NOT EXISTS auth_sessions_expiry ON auth_sessions(expires_at);
+CREATE TABLE IF NOT EXISTS apps (id text PRIMARY KEY, name text NOT NULL, type text NOT NULL CHECK(type IN ('web','desktop')), enabled boolean NOT NULL DEFAULT true, allowed_origins text[] NOT NULL DEFAULT '{}', created_at timestamptz NOT NULL DEFAULT now(), last_event_at timestamptz);
+CREATE TABLE IF NOT EXISTS events (app_id text NOT NULL REFERENCES apps(id), event_id text NOT NULL, event_type text NOT NULL, occurred_at timestamptz NOT NULL, day date NOT NULL, anonymous_id text NOT NULL, session_id text NOT NULL, app_version text NOT NULL DEFAULT '', platform text NOT NULL DEFAULT '', sdk_version text NOT NULL DEFAULT '', path text NOT NULL DEFAULT '', PRIMARY KEY(app_id,event_id));
+CREATE INDEX IF NOT EXISTS events_app_day ON events(app_id,day);
+CREATE INDEX IF NOT EXISTS events_day ON events(day);
+CREATE TABLE IF NOT EXISTS visitors (app_id text NOT NULL REFERENCES apps(id), anonymous_id text NOT NULL, first_day date NOT NULL, PRIMARY KEY(app_id,anonymous_id));
+CREATE TABLE IF NOT EXISTS app_sessions (app_id text NOT NULL REFERENCES apps(id), session_id text NOT NULL, first_day date NOT NULL, PRIMARY KEY(app_id,session_id));
+CREATE TABLE IF NOT EXISTS daily_visitors (app_id text NOT NULL REFERENCES apps(id), day date NOT NULL, anonymous_id text NOT NULL, PRIMARY KEY(app_id,day,anonymous_id));
+CREATE TABLE IF NOT EXISTS daily_metrics (app_id text NOT NULL REFERENCES apps(id), day date NOT NULL, starts bigint NOT NULL DEFAULT 0, page_views bigint NOT NULL DEFAULT 0, PRIMARY KEY(app_id,day));
