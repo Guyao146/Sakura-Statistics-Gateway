@@ -1,0 +1,79 @@
+name: Verify published deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: Published image tag or digest
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  compose:
+    runs-on: ubuntu-latest
+    env:
+      SAKURA_IMAGE: ${{ inputs.image }}
+      COMPOSE_PROJECT_NAME: sakura-verification
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Configure isolated deployment
+        shell: bash
+        run: |
+          database_password=$(openssl rand -hex 24)
+          admin_password="Test-Aa1!$(openssl rand -hex 24)"
+          echo "::add-mask::$database_password"
+          echo "::add-mask::$admin_password"
+          {
+            printf 'POSTGRES_USER=sakura\nPOSTGRES_DB=sakura\n'
+            printf 'POSTGRES_PASSWORD=%s\n' "$database_password"
+            printf 'DATABASE_URL=postgres://sakura:%s@postgres:5432/sakura?sslmode=disable\n' "$database_password"
+            printf 'ADMIN_USERNAME=verification\nADMIN_PASSWORD=%s\n' "$admin_password"
+            printf 'SESSION_SECURE=false\nPUBLIC_ORIGIN=http://127.0.0.1:8080\n'
+          } > .env
+      - name: Pull and start Compose
+        run: |
+          docker compose pull
+          docker compose up -d --wait --wait-timeout 180
+      - name: Verify static assets and statistics
+        shell: bash
+        run: |
+          python - <<'PY'
+          import datetime, http.cookiejar, json, pathlib, urllib.request, uuid
+          config = dict(line.split('=', 1) for line in pathlib.Path('.env').read_text().splitlines() if '=' in line)
+          base = 'http://127.0.0.1:8080'
+          opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+          def request(path, body=None):
+              data = None if body is None else json.dumps(body).encode()
+              req = urllib.request.Request(base + path, data=data, headers={'Origin': base, 'Content-Type': 'application/json'})
+              with opener.open(req, timeout=15) as response:
+                  return json.load(response)
+          assert request('/readyz')['database'] == 'ok'
+          for path, marker in [('/', b'<html'), ('/sdk.js', b'SakuraStats')]:
+              with opener.open(base + path, timeout=15) as response:
+                  assert marker in response.read(), path
+          request('/api/auth/login', {'username': config['ADMIN_USERNAME'], 'password': config['ADMIN_PASSWORD']})
+          app = request('/api/apps', {'name': '[Synthetic deployment verification]', 'type': 'desktop', 'allowed_origins': []})['app']
+          event = {'schema_version': 1, 'event_id': str(uuid.uuid4()), 'event_type': 'app_start', 'occurred_at': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'anonymous_id': str(uuid.uuid4()), 'session_id': str(uuid.uuid4()), 'platform': 'linux', 'app_version': 'deployment-check'}
+          payload = {'app_id': app['id'], 'events': [event]}
+          assert request('/api/collect', payload)['accepted'] == 1
+          assert request('/api/collect', payload)['duplicates'] == 1
+          totals = request('/api/apps/' + app['id'] + '/stats')['totals']
+          assert totals['active'] == 1 and totals['starts'] == 1 and totals['new_visitors'] == 1 and totals['sessions'] == 0, totals
+          request('/api/auth/logout', {})
+          print('Published image: Compose readiness, frontend, SDK, login, collection, retry and statistics verified.')
+          PY
+      - name: Diagnostics
+        if: failure()
+        run: docker compose logs --tail=80
+      - name: Remove isolated verification containers
+        if: always()
+        run: docker compose down -v
