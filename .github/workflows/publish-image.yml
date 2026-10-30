@@ -61,7 +61,7 @@ jobs:
           cp compose.yaml README.md deployment/
           cp docs/Caddyfile docs/*.md deployment/docs/
           cp scripts/backup.py scripts/restore.py deployment/scripts/
-          rg -v '^SAKURA_IMAGE=' .env.example > deployment/.env.example
+          grep -v '^SAKURA_IMAGE=' .env.example > deployment/.env.example
           printf '\nSAKURA_IMAGE=%s@%s\n' '${{ steps.image.outputs.name }}' '${{ steps.build.outputs.digest }}' >> deployment/.env.example
           tar -czf sakura-deployment.tar.gz -C deployment .
       - name: Upload deployment package
