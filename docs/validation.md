@@ -6,6 +6,7 @@
 
 - 代码已推送至 [GitHub 公共仓库](https://github.com/Guyao146/Sakura-Statistics-Gateway)。
 - [首次镜像发布](https://github.com/Guyao146/Sakura-Statistics-Gateway/actions/runs/41041901315)全部成功：`ghcr.io/guyao146/sakura-statistics-gateway` 已发布 `linux/amd64`、`linux/arm64` 镜像；GHCR 匿名 token 和 manifest 已验证可用，使用公开镜像无需服务器登录。
+- [固定首版发布](https://github.com/Guyao146/Sakura-Statistics-Gateway/actions/runs/41043699773)和[首版 Compose 验收](https://github.com/Guyao146/Sakura-Statistics-Gateway/actions/runs/41044000434)均通过。`v0.1.0` 的公开标签与部署包 digest 一致：`sha256:a74a5559c3a050539e18f3af6fd1f98f7fe7f2821287c6b8851f22c50a81c956`；Release 已提供部署包和 SHA256 校验文件。
 - CI：Go 测试、go vet、构建、真实 PostgreSQL 16 集成测试及 Linux race 检测全部通过。
 - 前端：21 项网页 SDK 测试和 Vue/TypeScript 生产构建通过，覆盖存储不可用、网络重试、事件确认、路由、停用后身份轮换及统计时区午夜活动。
 - Python：客户端 7 项测试、备份/恢复工具 5 项模拟调用测试通过；模拟测试覆盖拒绝覆盖备份、失败文件清理、拒绝非空库恢复等行为。
