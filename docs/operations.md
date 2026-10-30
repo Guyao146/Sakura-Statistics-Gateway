@@ -2,7 +2,7 @@
 
 ## 配置及检查
 
-Compose 自动读取项目根 `.env`，Python 运维脚本不解析或执行该文件。基础 Compose 要求 `SAKURA_IMAGE` 为真实已发布镜像；即使只操作 postgres，Compose 配置插值也要求此值存在。镜像发布与访问权限见根 README，当前交付本身未发布任何镜像。不要在 shell 中 `source .env`。生产设置 `SESSION_SECURE=true`、`PUBLIC_ORIGIN=https://实际域名` 并从 HTTPS 域名访问；`PUBLIC_ORIGIN` 必须是浏览器看到的完整 origin（协议、主机及非默认端口，无结尾斜线），用于 TLS 反代后的管理请求同源校验。Caddy 配置的 DOMAIN 与其主机保持一致。本机 HTTP 开发显式设置 false。`.env.example` 是占位配置，必须替换密码，管理员密码要求至少 12 字符并包含大小写、数字和符号。数据库密码变更需同步数据库内角色密码，**仅修改 POSTGRES_PASSWORD 不会改变已有卷内的角色密码**。
+Compose 自动读取项目根 `.env`，Python 运维脚本不解析或执行该文件。基础 Compose 要求 `SAKURA_IMAGE` 为真实已发布镜像；即使只操作 postgres，Compose 配置插值也要求此值存在。镜像发布与访问权限见根 README；本项目已发布公开镜像，部署包配置固定镜像 digest，可直接拉取。不要在 shell 中 `source .env`。生产设置 `SESSION_SECURE=true`、`PUBLIC_ORIGIN=https://实际域名` 并从 HTTPS 域名访问；`PUBLIC_ORIGIN` 必须是浏览器看到的完整 origin（协议、主机及非默认端口，无结尾斜线），用于 TLS 反代后的管理请求同源校验。Caddy 配置的 DOMAIN 与其主机保持一致。本机 HTTP 开发显式设置 false。`.env.example` 是占位配置，必须替换密码，管理员密码要求至少 12 字符并包含大小写、数字和符号。数据库密码变更需同步数据库内角色密码，**仅修改 POSTGRES_PASSWORD 不会改变已有卷内的角色密码**。
 
 `DATABASE_URL` 使用 Compose 网络主机 `postgres:5432`；特殊字符按 URL 规则编码。示例 `sslmode=disable` 仅适用于同机容器内部网络；连接外部数据库应按数据库服务要求开启并校验证书。
 

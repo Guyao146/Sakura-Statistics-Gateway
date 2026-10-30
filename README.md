@@ -2,63 +2,66 @@
 
 Go 后端、Vue + Vite 管理台和 PostgreSQL 16 组成的轻量统计服务。第一版在采集请求的数据库事务中写入事件并增量维护汇总，提交成功后返回确认；没有后台消费队列。管理台通过 HttpOnly Cookie 登录，应用 ID 用于选择统计应用，不是密钥。
 
-## 首次启动
+## 首次部署
 
-服务器只需要 Docker Engine / Docker Desktop 和 Compose v2，无需 Go、Node 或本地构建。备份工具和客户端示例需要 Python 3.9+。准备本仓库的 `compose.yaml`、`.env.example`、`docs/Caddyfile`（HTTPS 时需要）及 `scripts/`（备份时需要），在该部署目录操作。
+代码已公开于 [GitHub 仓库](https://github.com/Guyao146/Sakura-Statistics-Gateway)。镜像 `ghcr.io/guyao146/sakura-statistics-gateway` 已发布，包含 `linux/amd64`、`linux/arm64`，可匿名拉取，无需登录 GHCR。首次发布和实际 Compose 集成验收均已成功，详见[验证记录](docs/validation.md)。
 
-**当前模板没有发布真实镜像，不能直接填一个猜测的 GHCR 地址拉取。** 先按[镜像发布](#镜像发布)在你自己的 GitHub 仓库运行 Actions，从发布记录取得真实镜像地址；代码由此交付不代表镜像已发布。也可以使用后文的本地构建流程。
+固定首版 `v0.1.0` 的部署入口：[Release 页面](https://github.com/Guyao146/Sakura-Statistics-Gateway/releases/tag/v0.1.0)、[部署包下载](https://github.com/Guyao146/Sakura-Statistics-Gateway/releases/download/v0.1.0/sakura-deployment.tar.gz)。部署包配置使用对应镜像的固定 digest，避免后续标签变化影响部署。
 
-1. 复制 `.env.example` 为 `.env`，填写真实 `SAKURA_IMAGE`（推荐固定版本标签或 digest），为数据库和管理员设置不同的随机密码。管理员密码至少 12 字符，包含大写、小写、数字和符号。`DATABASE_URL` 的用户、密码、库名须与 `POSTGRES_*` 一致；URL 密码中的特殊字符要百分号编码。不要提交 `.env`。
-2. 本机 HTTP 开发把 `.env` 的 `SESSION_SECURE` 改成 `false`。保持 `DOMAIN=localhost`。
-3. 启动并访问管理台。
+服务器只需 Docker Engine 和 Compose v2，**不需要下载源码、安装 Go/Node 或执行 build**。备份/恢复脚本另需 Python 3.9+。部署包包含 `compose.yaml`、`.env.example`、`docs/` 和 `scripts/`，不含 `examples/`、源码或 `compose.build.yaml`。
 
-```sh
-docker compose pull
-docker compose up -d
-docker compose logs --tail=100 app
-curl http://127.0.0.1:8080/readyz
-```
-
-打开 `http://127.0.0.1:8080`，使用 `.env` 中的管理员账户登录，创建 `desktop` 应用，再复制其 ID 运行示例：
+1. 下载并解压首版部署包，在解压目录复制配置：
 
 ```sh
-python examples/python/demo.py --app-id YOUR_APP_ID
-python -m unittest discover -s examples/python -v
+mkdir -p sakura-deployment
+cd sakura-deployment
+curl -fL https://github.com/Guyao146/Sakura-Statistics-Gateway/releases/download/v0.1.0/sakura-deployment.tar.gz -o sakura-deployment.tar.gz
+tar -xzf sakura-deployment.tar.gz
+cp .env.example .env
 ```
 
-示例首次构造客户端时记录一次启动；只有在提示符实际输入交互时调用 `mark_active()`。无事件时页面显示空数据是正常状态。`/healthz` 表示进程可响应，`/readyz` 和 `/api/status` 还检查数据库连接。Postgres 的 Compose healthcheck 只判断数据库是否接受连接，不能替代应用 readiness。
+2. 编辑 `.env`，保留包内 `SAKURA_IMAGE` 的固定镜像 digest。设置 `DOMAIN=stats.example.com`、`PUBLIC_ORIGIN=https://stats.example.com`（与浏览器访问地址完全一致，无结尾斜线）、`SESSION_SECURE=true`。为数据库和管理员设置不同的长随机密码；管理员密码至少 12 字符，包含大写、小写、数字和符号。`DATABASE_URL` 的用户、密码、库名须与 `POSTGRES_*` 一致，URL 密码中的特殊字符须百分号编码。不要提交 `.env`。
+3. 将域名 DNS A/AAAA 指向服务器，开放 TCP 80/443，确认端口未被其他服务占用。
+4. 拉取镜像并启动 HTTPS 服务：
 
 ```sh
-docker compose stop
-docker compose up -d
+docker compose --profile https pull
+docker compose --profile https up -d
+docker compose --profile https logs --tail=100 app caddy
+curl https://stats.example.com/readyz
 ```
+
+访问 `https://stats.example.com`，使用 `.env` 中的管理员账户登录并创建应用。客户端示例位于完整源码仓库，不在部署包中；接入说明见文末。Caddy 真实域名签证等未完成项目见[验证记录](docs/validation.md)。
+
+无事件时页面显示空数据是正常状态。`/healthz` 表示进程可响应，`/readyz` 和 `/api/status` 还检查数据库连接。Postgres 的 Compose healthcheck 只判断数据库是否接受连接，不能替代应用 readiness。
 
 数据存储在 `postgres_data` 命名卷中。`docker compose down` 保留卷；**`docker compose down -v` 会删除数据库及 Caddy 卷，不能用于常规升级或停机。**
 
-本地已完成的检查及尚未验证项目见[验证记录](docs/validation.md)。
+## 本机 HTTP 试用
 
-## 镜像发布
-
-仓库包含 `.github/workflows/publish-image.yml`，由版本标签 `v*` 推送触发，也支持手动运行。需要你先把完整代码推到自己的 GitHub 仓库，再从仓库 Actions 运行；本交付没有创建仓库或推送代码，也没有已发布镜像地址。
-
-发布任务先调用仓库 CI（Go、真实 PostgreSQL 16 集成测试、前端与 Python 测试），验证通过才构建推送；这里尚未实际运行 GitHub Actions 或 PostgreSQL 16 容器验证。工作流使用 GitHub 自带的 `GITHUB_TOKEN`（`contents: read`、`packages: write`）登录 GHCR，无需预先配置额外 registry 密码。组织若限制 Actions/Packages 写入，需要仓库所有者调整其策略。工作流以实际 `github.repository` 的小写路径命名镜像，构建并发布 `linux/amd64`、`linux/arm64`；版本标签保留为 `v1.0.0` 这样的标签，并发布 `sha-完整提交SHA` 标签。没有默认 `latest` 标签。以工作流输出的标签/digest 为准填写 `SAKURA_IMAGE`，此处不猜测 OWNER。
-
-发布成功后，Actions 同时提供 `sakura-deployment` 下载产物，内含 `sakura-deployment.tar.gz`。部署包包含 Compose、配置示例、HTTPS 配置和备份脚本，配置示例已填写本次镜像的固定 digest；服务器解压后补充密码、域名等配置即可使用，无需下载源码。
-
-GHCR 包首次发布可能是私有：在 GitHub Packages 将它设为公开后服务器可匿名拉取。保持私有时，服务器需要先 `docker login ghcr.io`，使用拥有该包读取权限的凭据（通常为带 `read:packages` 的 PAT；组织可能还要求 SSO 授权）。Actions 的临时 GITHUB_TOKEN 不能当作长期服务器登录密码。
-
-配置完真实镜像地址后，服务器操作只有：
+也可用部署包在本机试用，无需构建。将 `.env` 改为 `SESSION_SECURE=false`、`PUBLIC_ORIGIN=http://127.0.0.1:8080`、`DOMAIN=localhost`，不启用 HTTPS profile：
 
 ```sh
 docker compose pull
 docker compose up -d
+curl http://127.0.0.1:8080/readyz
 ```
 
-生产 HTTPS 使用相同命令加 `--profile https`。基础 Compose 没有 build 字段，不会要求服务器编译源码。
+使用 `http://127.0.0.1:8080` 访问，避免换成不同 origin。生产应使用 HTTPS 和安全 Cookie。
+
+## 镜像发布
+
+以下仅供维护者或 fork 后自行发布，**不是使用本项目公开镜像的必需步骤**。
+
+仓库的 `.github/workflows/publish-image.yml` 由 `v[0-9]*` 标签推送触发，也支持手动运行。发布前先执行 CI（Go、真实 PostgreSQL 16 集成测试、race、前端与 Python 测试），通过后才构建并推送 `linux/amd64`、`linux/arm64` 镜像。工作流使用 GitHub 自带的 `GITHUB_TOKEN`（`contents: read`、`packages: write`）登录 GHCR，不需要额外 registry 密码；自行发布时须确保仓库或组织允许 Actions/Packages 写入。
+
+镜像路径取 `github.repository` 的小写形式，发布版本标签（如 `v0.1.1`）和 `sha-完整提交SHA` 标签，没有默认 `latest`。Actions 的 `sakura-deployment` 产物内含 `sakura-deployment.tar.gz`，包内配置将 `SAKURA_IMAGE` 固定为该次发布的 digest。以实际发布输出为准，不要猜测标签或 digest。
+
+本项目的 GHCR 镜像已公开，可匿名拉取。自行发布的包若为私有，可改为公开或为自己的服务器另配读取凭据；不要把 Actions 的临时 `GITHUB_TOKEN` 当作长期服务器登录密码。服务器使用部署包执行前文的 `docker compose --profile https pull` / `up -d` 即可，基础 Compose 没有 build 字段。
 
 ## 本地容器构建
 
-开发机器有完整源码时，把本地 `.env` 的 `SAKURA_IMAGE` 设为 `sakura-statistics-gateway:local`，再执行：
+本节仅供开发者在**完整源码仓库**中操作，部署包不含 `compose.build.yaml`。把本地 `.env` 的 `SAKURA_IMAGE` 设为 `sakura-statistics-gateway:local`，再执行：
 
 ```sh
 docker compose -f compose.yaml -f compose.build.yaml up -d --build
@@ -68,7 +71,7 @@ docker compose -f compose.yaml -f compose.build.yaml up -d --build
 
 ## 本地开发
 
-模块声明 Go 1.23+，推荐 Go 1.27（当前协作验证版本 1.27.3，容器和 CI 对齐 1.27），Node.js 22（Vite 需要 22.12+）和 PostgreSQL 16。可只启动数据库：
+仅适用于**完整源码仓库**，不是服务器部署步骤。模块声明 Go 1.23+，推荐 Go 1.27（当前协作验证版本 1.27.3，容器和 CI 对齐 1.27），Node.js 22（Vite 需要 22.12+）和 PostgreSQL 16。可只启动数据库：
 
 ```sh
 docker compose up -d postgres
@@ -144,7 +147,7 @@ python scripts/restore.py backups-before-upgrade.dump --confirm-empty-database s
 
 - [事件协议和 Cookie 管理 API](docs/protocol.md)
 - [指标口径及限制](docs/metrics.md)
-- [Python 客户端示例](examples/python/README.md)
+- [Python 客户端示例（源码仓库）](https://github.com/Guyao146/Sakura-Statistics-Gateway/tree/v0.1.0/examples/python)，部署包不包含 `examples/`
 - [网页 SDK 与停用接口](docs/web-sdk.md)
 - [首版范围与后续计划](docs/roadmap.md)
 
