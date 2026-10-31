@@ -40,7 +40,7 @@ services:
     restart: unless-stopped
 
   frontend:
-    image: ${SAKURA_FRONTEND_IMAGE:-ghcr.io/guyao146/sakura-statistics-gateway-web:v0.1.1}
+    image: ${SAKURA_FRONTEND_IMAGE:-ghcr.io/guyao146/sakura-statistics-gateway-web:v0.1.2}
     profiles: ["frontend"]
     ports:
       - "127.0.0.1:8081:80"

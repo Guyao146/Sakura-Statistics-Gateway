@@ -11,7 +11,8 @@ RUN npm run build
 FROM nginx:alpine
 # Keep port 80, but run the master and worker without root privileges.
 # Compose permits unprivileged binding and bounds resources on shared hosts.
-RUN sed -i '/^user[[:space:]]/d; s@/var/run/nginx.pid@/tmp/nginx.pid@; s/worker_processes[[:space:]]*auto;/worker_processes 1;/' /etc/nginx/nginx.conf \
+RUN sed -i '/^user[[:space:]]/d; s@^[[:space:]]*pid[[:space:]][^;]*;@pid /tmp/nginx.pid;@; s/worker_processes[[:space:]]*auto;/worker_processes 1;/' /etc/nginx/nginx.conf \
+    && grep -q '^pid /tmp/nginx.pid;' /etc/nginx/nginx.conf \
     && chown -R nginx:nginx /var/cache/nginx
 COPY --from=build --chown=nginx:nginx /src/web/dist /usr/share/nginx/html
 COPY web/nginx.conf /etc/nginx/conf.d/default.conf

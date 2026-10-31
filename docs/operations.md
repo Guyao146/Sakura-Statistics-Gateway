@@ -16,7 +16,7 @@ curl http://127.0.0.1:8080/readyz
 
 ## 可选前端发布配置
 
-`v0.1.1` 计划新增独立前端镜像；发布、真实容器验收与浏览器检查状态以实际记录为准，本手册不把计划版本记为已验证。新版部署包 `.env.example` 分别固定 `SAKURA_IMAGE`、`SAKURA_FRONTEND_IMAGE` 的实际发布 digest，服务器复制到自己的 `.env` 后填独立密码；包中没有机器 `.env` 或真实凭据。不要在发布前使用计划标签，也不要猜 digest。
+`v0.1.2` 待发布，包含独立前端镜像；发布、真实容器验收与浏览器检查状态以实际记录为准，本手册不把计划版本记为已验证。新版部署包 `.env.example` 分别固定 `SAKURA_IMAGE`、`SAKURA_FRONTEND_IMAGE` 的实际发布 digest，服务器复制到自己的 `.env` 后填独立密码；包中没有机器 `.env` 或真实凭据。不要在发布前使用计划标签，也不要猜 digest。
 
 基础 Compose 的 `frontend` 是可选 profile。普通部署与 `https` profile 仍由 app 提供内置管理台，Caddy 仍反代 `app:8080`；无需强制启动 frontend。使用独立前端时，先采用新 `compose.yaml`，把已发布的 `SAKURA_FRONTEND_IMAGE` 加到已有配置，保留密码/卷，并执行：
 
