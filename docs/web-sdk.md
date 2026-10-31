@@ -9,13 +9,15 @@
   data-endpoint="https://stats.example.com/api/collect"></script>
 ```
 
-脚本默认相对于 SDK 来源解析 `/api/collect`。显式设置 endpoint 更清楚。每个页面使用一个实例；使用 HTTPS，按网站 CSP 放行统计服务的 script-src/connect-src。采集不使用管理员 Cookie。
+脚本默认相对于 SDK 来源解析 `/api/collect`。显式设置 endpoint 更清楚。每个页面使用一个实例；使用 HTTPS，按网站 CSP 放行统计服务的 script-src/connect-src。采集接口不要求管理员 Cookie；fetch 使用 `credentials: 'omit'`，不要将后台凭据放入 SDK。
+
+完整流程、SPA 去重、CSP 与验收步骤见[统一接入指南](integration.md)。
 
 SDK 记录可见页面首次 page_view，并监听 `history.pushState`、`replaceState`、`popstate`，相同自动路径不会重复上报；`SakuraStats.trackPage('/settings')` 可显式记录路径。默认丢弃 query/hash；显式设置 `data-hash-mode="route"` 时，将 `#/...` 路由编码为普通路径，例如 `/home#/settings?private=1` 记录为 `/home/~hash/settings`，`/#/settings` 记录为 `/~hash/settings`，因此后台可以区分 hash 子路由。hash 内查询参数与普通 `#anchor` 不进入路径。避免在任何路径中放个人信息。
 
-匿名 ID 保存在当前站点 localStorage，多个标签页可共享 session；30 分钟无事件后新建 session。服务端按 session 的最早事件日统计，跨午夜不自动拆分。存储被禁用时退化为内存，刷新后不保证身份或队列延续；跨站点存储隔离，不做跨端或跨站合并。localStorage 不提供跨标签原子事务，多个标签恰好同时首次建会话或更新活跃窗口时仍可能分裂会话或重复发送；服务端仅按 event_id 去重。
+匿名 ID 保存在当前站点 localStorage，多个标签页可共享 session；距离最近一次有效 session touched 达到 30 分钟后新建 session，合并的活跃检查也可能更新 touched。服务端按 session 的最早事件日统计，跨午夜不自动拆分。存储被禁用时退化为内存，刷新后不保证身份或队列延续；跨站点存储隔离，不做跨端或跨站合并。localStorage 不提供跨标签原子事务，多个标签恰好同时首次建会话或更新活跃窗口时仍可能分裂会话或重复发送；服务端仅按 event_id 去重。
 
-活动事件要求页面可见且最近 60 秒有交互；首次加载视作最近交互，之后监听 pointerdown/keydown/touchstart/scroll。同 session 的 active 通常最多每 5 分钟记录一次；进入新的统计日后首次有效活动可立即记录。`data-timezone` 默认 `Asia/Shanghai`，应与服务端 `STATISTICS_TIMEZONE` 一致；管理台生成的接入代码会带上该时区。无效时区回退到默认值。轮询只会在页面可见及活动条件满足时工作。这些事件不构成真实用户证明。
+活动事件要求页面可见且最近 60 秒有交互；首次加载视作最近交互，之后监听 pointerdown/keydown/touchstart/scroll。同 session 的 active 通常最多每 5 分钟记录一次；进入新的统计日后首次有效活动可立即记录。`data-timezone` 默认 `Asia/Shanghai`，应与服务端 `STATISTICS_TIMEZONE` 一致；管理台生成的接入代码会带上该时区。无效时区回退到默认值。只有活跃记录受页面可见和最近交互限制；发送队列的轮询不受这些条件限制。这些事件不构成真实用户证明。
 
 本地队列最多 200 条，满时丢弃最老事件；每批 30 条。网络、5xx、429 会退避重试，事件 ID 保持不变；其他 4xx 和成功响应会移除批次，SDK 不暴露逐条 rejection 的诊断界面。HTTP 成功即按整批已确认处理，不逐字段校验返回数量。超过 7 天的本地事件清除。pagehide 尝试 sendBeacon，因拿不到确认会保留原 ID，下次重复上报交给服务端去重。浏览器关闭、存储清理和网络错误都可能造成丢失，不保证完整送达。
 
@@ -29,6 +31,8 @@ window.SakuraStats.flush();    // 返回 Promise；仍受退避与停用状态�
 ```
 
 停用标记按应用保存在当前站点 localStorage，并通过 storage 事件同步其他标签页；存储不可用时无法跨刷新持久化。已发出并被服务端接受的请求无法撤回，disable 不会删除服务器历史数据。第一版没有服务端个人数据删除或保留期清理接口。
+
+`trackPage(path?)` 是手动追加，不对连续手动调用去重。History 路由及显式 hash 路由已有自动监听，不要再为同一次导航调用该方法。`enable()` 从停用恢复时也会记录可见当前页。`flush()` 每次只尝试发送一批最多 30 条；Promise 完成不表示事件一定送达。
 
 若产品要求先同意后采集，应在获得同意后才插入 SDK script；脚本载入默认即会采集首次页面访问，加载后再 disable 不等同于事先阻止采集。可由产品设置 UI 调用 disable/enable，SDK 本身不提供同意管理 UI。
 

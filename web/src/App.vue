@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, onBeforeUnmount, ref } from 'vue'
 import TrendChart from './TrendChart.vue'
+import IntegrationGuide from './IntegrationGuide.vue'
+import { guideSections } from './guide'
 import { api, getStatus, ApiError, message, localDate, rangeDays, type Application, type ApplicationStats, type OverviewStats, type ServiceStatus, type Stats, type Metrics } from './api'
 const username = ref('')
 const password = ref('')
@@ -11,7 +13,8 @@ const authError = ref('')
 const apps = ref<Application[]>([])
 const selectedId = ref('')
 const selected = ref<Application | null>(null)
-const view = ref<'overview' | 'apps' | 'status'>('overview')
+const view = ref<'overview' | 'apps' | 'status' | 'guide'>('overview')
+const guideSection = ref('')
 const stats = ref<Stats | null>(null)
 const loading = ref(false)
 const error = ref('')
@@ -35,11 +38,15 @@ const cards: { key: keyof Metrics; label: string; desc: string }[] = [
 ]
 const format = (n?: number) => new Intl.NumberFormat('zh-CN').format(n ?? 0)
 const when = (s?: string | null) => s ? (Number.isNaN(Date.parse(s)) ? s : new Date(s).toLocaleString('zh-CN', { hour12: false })) : '暂无事件'
-const title = computed(() => selected.value?.name || (view.value === 'apps' ? '应用管理' : view.value === 'status' ? '服务状态' : '数据总览'))
+const title = computed(() => view.value === 'guide' ? '接入指南' : selected.value?.name || (view.value === 'apps' ? '应用管理' : view.value === 'status' ? '服务状态' : '数据总览'))
+const headingLabel = computed(() => view.value === 'guide' ? 'INTEGRATION GUIDE' : view.value === 'overview' ? 'OVERVIEW' : view.value === 'apps' ? 'APPLICATIONS' : 'SYSTEM HEALTH')
+const headingDescription = computed(() => view.value === 'guide' ? '从网页 SDK 到桌面客户端，按步骤完成接入与验收。' : selected.value ? `了解应用的访问表现与使用趋势 · ${selected.value.type === 'web' ? 'Web 应用' : '桌面应用'}` : view.value === 'overview' ? '每一次访问，都是增长的信号。' : view.value === 'apps' ? '管理你的应用，连接每一份数据。' : '查看统计服务与数据库的当前状态。')
+const canCreateApp = computed(() => view.value === 'overview' || view.value === 'apps')
+const snippetCode = ref<HTMLElement | null>(null)
 let generation = 0
 let noticeTimer: ReturnType<typeof setTimeout> | undefined
 function toast(text: string) { notice.value = text; clearTimeout(noticeTimer); noticeTimer = setTimeout(() => notice.value = '', 3500) }
-function expired() { generation++; user.value = ''; password.value = ''; stats.value = null; apps.value = []; selected.value = null; selectedId.value = ''; newOpen.value = false; loading.value = false; authError.value = '登录已失效，请重新登录' }
+function expired() { generation++; user.value = ''; password.value = ''; stats.value = null; apps.value = []; selected.value = null; selectedId.value = ''; guideSection.value = ''; newOpen.value = false; loading.value = false; authError.value = '登录已失效，请重新登录' }
 async function login() {
   if (!username.value.trim() || !password.value) { authError.value = '请输入用户名和密码'; return }
   loggingIn.value = true; authError.value = ''
@@ -50,11 +57,13 @@ async function logout() {
   busy.value = true; actionError.value = ''
   try { await api('/auth/logout', { method: 'POST' }); expired(); authError.value = '' } catch (e) { actionError.value = message(e) } finally { busy.value = false }
 }
-async function navigate(next: typeof view.value, id = '') {
+async function navigate(next: typeof view.value, id = '', section = '') {
   if (busy.value) return
-  view.value = next; selectedId.value = id; selected.value = null; stats.value = null; status.value = null; actionError.value = ''; await load()
+  view.value = next; selectedId.value = next === 'guide' ? '' : id; guideSection.value = next === 'guide' ? section : ''; selected.value = null; stats.value = null; status.value = null; newOpen.value = false; copied.value = false; actionError.value = ''; await load()
 }
+function openGuide(type: Application['type']) { return navigate('guide', '', guideSections[type]) }
 async function load() {
+  if (view.value === 'guide') { ++generation; loading.value = false; error.value = ''; actionError.value = ''; return }
   if (rangeError.value && view.value === 'overview') return
   const token = ++generation
   loading.value = true; error.value = ''; actionError.value = ''
@@ -96,9 +105,26 @@ async function createApp() {
     newOpen.value = false; draft.value = { name: '', type: 'web', origins: '' }; busy.value = false; toast('应用已创建'); await navigate('overview', result.app.id)
   } catch (e) { formError.value = message(e) } finally { busy.value = false }
 }
-async function copy() {
-  try { await navigator.clipboard.writeText(snippet.value); copied.value = true; toast('接入代码已复制') } catch { actionError.value = '无法访问剪贴板，请选中代码手动复制' }
+async function copyText(content: string, code: HTMLElement | null, success = '代码已复制'): Promise<boolean> {
+  actionError.value = ''
+  try {
+    await navigator.clipboard.writeText(content)
+    toast(success)
+    return true
+  } catch {
+    if (code) {
+      const selection = window.getSelection()
+      const range = document.createRange()
+      range.selectNodeContents(code)
+      selection?.removeAllRanges()
+      selection?.addRange(range)
+    }
+    actionError.value = '无法访问剪贴板，请选中代码手动复制'
+    return false
+  }
 }
+async function copy() { copied.value = await copyText(snippet.value, snippetCode.value, '接入代码已复制') }
+async function copyGuideCode(content: string, code: HTMLElement) { await copyText(content, code) }
 function escapeKey(e: KeyboardEvent) { if (e.key === 'Escape' && !busy.value) newOpen.value = false }
 onMounted(async () => {
   window.addEventListener('sakura:unauthorized', expired); window.addEventListener('keydown', escapeKey)
@@ -112,17 +138,18 @@ onBeforeUnmount(() => { window.removeEventListener('sakura:unauthorized', expire
 <template>
   <div v-if="booting" class="splash"><span class="brand-mark">S</span><p>正在连接 Sakura…</p></div>
   <main v-else-if="!user" class="login-shell">
-    <div class="login-art"><div class="wordmark"><span class="brand-mark">S</span>Sakura <small>STATISTICS</small></div><div><span class="eyebrow">让每一次访问，都有迹可循</span><h1>洞察增长，<br>从此刻开始。</h1><p>在一个安静、清晰的空间里，<br>了解你的应用与访客。</p><div class="art-bars"><i v-for="n in 12" :key="n" :style="{ height: `${25 + (n * 17 % 65)}%` }"></i></div></div><small>简单的数据，清晰的方向。</small></div>
+    <div class="login-art"><div class="wordmark"><span class="brand-mark">S</span>Sakura <small>STATISTICS</small></div><div><span class="eyebrow">让每一次访问，都有迹可循</span><h1>洞察增长，<br>从此刻开始。</h1><p>在一个安静、清晰的空间里，<br>了解你的应用与访客。</p><div class="art-bars"><i v-for="n in 12" :key="n" :style="{ height: `${25 + (n * 17 % 65)}%`, '--h': `${25 + (n * 17 % 65)}%` }"></i></div></div><small>简单的数据，清晰的方向。</small></div>
     <section class="login-card"><span class="eyebrow">欢迎回来</span><h2>登录控制台</h2><p class="muted">使用管理员账户查看应用统计。</p><form @submit.prevent="login"><label>用户名<input v-model="username" name="username" autocomplete="username" autofocus required placeholder="请输入用户名" /></label><label>密码<input v-model="password" name="password" type="password" autocomplete="current-password" required placeholder="请输入密码" /></label><p v-if="authError" class="alert error" role="alert">{{ authError }}</p><button class="primary full" :disabled="loggingIn">{{ loggingIn ? '正在登录…' : '登录控制台 →' }}</button></form><p class="login-foot">Sakura Statistics · 轻量应用分析</p></section>
   </main>
   <div v-else class="shell">
-    <aside class="sidebar"><a href="#" class="wordmark" @click.prevent="navigate('overview')"><span class="brand-mark">S</span><span>Sakura<small>STATISTICS</small></span></a><p class="nav-label">工作空间</p><nav aria-label="主导航"><button :class="{ active: view === 'overview' }" @click="navigate('overview')"><span>◫</span>数据总览</button><button :class="{ active: view === 'apps' }" @click="navigate('apps')"><span>▦</span>应用管理<span class="nav-count">{{ apps.length }}</span></button><button :class="{ active: view === 'status' }" @click="navigate('status')"><span>◉</span>服务状态</button></nav><div class="sidebar-bottom"><div class="avatar">{{ user.slice(0, 1).toUpperCase() }}</div><div><strong>{{ user }}</strong><small>管理员</small></div><button class="logout" :disabled="busy" aria-label="退出登录" title="退出登录" @click="logout">↗</button></div></aside>
-    <div class="workspace"><header class="topbar"><span>工作空间 <span class="muted">/ {{ selected ? '应用详情' : title }}</span></span><span class="top-tag">SAKURA CONSOLE</span></header><main class="content">
-      <div class="page-heading"><div><button v-if="selectedId" class="back" @click="navigate('apps')">← 返回应用列表</button><span v-else class="eyebrow">{{ view === 'overview' ? 'OVERVIEW' : view === 'apps' ? 'APPLICATIONS' : 'SYSTEM HEALTH' }}</span><h1>{{ title }}</h1><p class="muted">{{ selected ? `了解应用的访问表现与使用趋势 · ${selected.type === 'web' ? 'Web 应用' : '桌面应用'}` : view === 'overview' ? '每一次访问，都是增长的信号。' : view === 'apps' ? '管理你的应用，连接每一份数据。' : '查看统计服务与数据库的当前状态。' }}</p></div><button v-if="view !== 'status'" class="primary" @click="newOpen = true; formError = ''">＋ 新建应用</button><button v-else class="button" :disabled="loading" @click="load">刷新状态</button></div>
+    <aside class="sidebar"><a href="#" class="wordmark" @click.prevent="navigate('overview')"><span class="brand-mark">S</span><span>Sakura<small>STATISTICS</small></span></a><p class="nav-label">工作空间</p><nav aria-label="主导航"><button :class="{ active: view === 'overview' }" aria-label="数据总览" title="数据总览" @click="navigate('overview')"><span aria-hidden="true">◫</span>数据总览</button><button :class="{ active: view === 'apps' }" aria-label="应用管理" title="应用管理" @click="navigate('apps')"><span aria-hidden="true">▦</span>应用管理<span class="nav-count">{{ apps.length }}</span></button><button :class="{ active: view === 'status' }" aria-label="服务状态" title="服务状态" @click="navigate('status')"><span aria-hidden="true">◉</span>服务状态</button><button :class="{ active: view === 'guide' }" aria-label="接入指南" title="接入指南" @click="navigate('guide')"><span aria-hidden="true">▤</span>接入指南</button></nav><div class="sidebar-bottom"><div class="avatar">{{ user.slice(0, 1).toUpperCase() }}</div><div><strong>{{ user }}</strong><small>管理员</small></div><button class="logout" :disabled="busy" aria-label="退出登录" title="退出登录" @click="logout">↗</button></div></aside>
+    <div class="workspace"><header class="topbar"><span>工作空间 <span class="muted">/ {{ view !== 'guide' && selected ? '应用详情' : title }}</span></span><span class="top-tag">SAKURA CONSOLE</span></header><main class="content">
+      <div class="page-heading"><div><button v-if="view !== 'guide' && selectedId" class="back" @click="navigate('apps')">← 返回应用列表</button><span v-else class="eyebrow">{{ headingLabel }}</span><h1>{{ title }}</h1><p class="muted">{{ headingDescription }}</p></div><button v-if="canCreateApp" class="primary" @click="newOpen = true; formError = ''">＋ 新建应用</button><button v-else-if="view === 'status'" class="button" :disabled="loading" @click="load">刷新状态</button></div>
       <div v-if="view === 'overview'" class="filter-bar"><div class="date-fields"><label>开始日期<input v-model="from" aria-label="开始日期" type="date" /></label><span>—</span><label>结束日期<input v-model="to" aria-label="结束日期" type="date" /></label><button class="button" :disabled="!!rangeError || loading" @click="load">查询</button></div><div class="presets"><button v-for="days in [7, 30, 90]" :key="days" @click="preset(days)">近 {{ days }} 天</button></div></div>
       <p v-if="rangeError && view === 'overview'" class="alert error" role="alert">{{ rangeError }}</p>
       <p v-if="actionError" class="alert error" role="alert">{{ actionError }}</p>
-      <div v-if="loading" class="loading-panel" role="status"><span class="spinner"></span>正在加载数据…</div>
+      <IntegrationGuide v-if="view === 'guide'" :section="guideSection" @copy="copyGuideCode" />
+      <div v-else-if="loading" class="loading-panel" role="status"><span class="spinner"></span>正在加载数据…</div>
       <div v-else-if="error" class="empty panel"><h3>暂时无法加载</h3><p role="alert">{{ error }}</p><button class="button" @click="load">重新加载</button></div>
       <template v-else>
         <template v-if="view === 'overview' && stats">
@@ -132,7 +159,7 @@ onBeforeUnmount(() => { window.removeEventListener('sakura:unauthorized', expire
           <template v-if="selected">
             <section class="panel app-meta"><div><span class="badge" :class="selected.enabled ? 'green' : 'gray'">{{ selected.enabled ? '采集中' : '已停用' }}</span><span class="mono">{{ selected.id }}</span></div><div><span class="muted">最近事件 {{ when(stats.last_event_at) }}</span><button class="button" :disabled="busy" @click="toggle(selected)">{{ selected.enabled ? '停用应用' : '启用应用' }}</button></div><p class="muted">允许的来源：{{ selected.allowed_origins?.join('、') || '未配置' }}</p></section>
             <div class="detail-grid"><section class="panel"><div class="section-heading"><h2>版本分布</h2><span class="muted">按版本与平台</span></div><div class="table-wrap"><table><thead><tr><th>版本 / 平台</th><th class="number">活跃访客</th><th class="number">启动次数</th></tr></thead><tbody><tr v-for="v in stats.versions || []" :key="`${v.version}-${v.platform}`"><td>{{ v.version || '未知版本' }}<small class="cell-sub">{{ v.platform }}</small></td><td class="number">{{ format(v.active) }}</td><td class="number">{{ format(v.starts) }}</td></tr><tr v-if="!stats.versions?.length"><td colspan="3" class="table-empty">暂无版本数据</td></tr></tbody></table></div></section><section class="panel"><div class="section-heading"><h2>热门页面</h2><span class="muted">仅路径，不含查询参数</span></div><div class="table-wrap"><table><thead><tr><th>页面路径</th><th class="number">浏览次数</th></tr></thead><tbody><tr v-for="p in stats.pages || []" :key="p.path"><td class="mono path-cell">{{ p.path }}</td><td class="number">{{ format(p.page_views) }}</td></tr><tr v-if="!stats.pages?.length"><td colspan="2" class="table-empty">暂无页面数据</td></tr></tbody></table></div></section></div>
-            <section class="panel integration"><div class="section-heading"><div><h2>接入你的应用</h2><p>{{ selected.type === 'web' ? '将以下代码放入网站的 <head> 中，即可自动采集页面访问。' : '桌面应用通过采集协议上报，网页 SDK 仅适用于 Web 应用。' }}</p></div><button v-if="snippet" class="button" @click="copy">{{ copied ? '再次复制' : '复制代码' }}</button></div><pre v-if="snippet"><code>{{ snippet }}</code></pre><p v-else class="mono">app_id: {{ selected.id }}</p><p class="muted">应用 ID 是公开标识，不是 API 密钥或安全凭证。请在服务端配置来源校验、限流和数据校验。</p><p v-if="selected.type === 'web'" class="muted">SDK 默认按 pathname 统计页面；支持 SakuraStats.disable() / enable() / trackPage() / flush()。</p></section>
+            <section class="panel integration"><div class="section-heading"><div><h2>接入你的应用</h2><p>{{ selected.type === 'web' ? '将以下代码放入网站的 <head> 中，即可自动采集页面访问。' : '桌面应用通过采集协议上报，网页 SDK 仅适用于 Web 应用。' }}</p></div><button v-if="snippet" class="button" @click="copy">{{ copied ? '再次复制' : '复制代码' }}</button></div><pre v-if="snippet"><code ref="snippetCode">{{ snippet }}</code></pre><p v-else class="mono">app_id: {{ selected.id }}</p><p><a class="text-link" :href="`#${guideSections[selected.type]}`" @click.prevent="openGuide(selected.type)">{{ selected.type === 'web' ? '查看完整网页接入指南 →' : '查看完整桌面客户端接入指南 →' }}</a></p><p class="muted">应用 ID 是公开标识，不是 API 密钥或安全凭证。请在服务端配置来源校验、限流和数据校验。</p><p v-if="selected.type === 'web'" class="muted">SDK 默认按 pathname 统计页面；支持 SakuraStats.disable() / enable() / trackPage() / flush()。</p></section>
           </template>
           <section v-else class="panel"><div class="section-heading"><div><h2>应用表现</h2><p>所选日期范围内的各应用数据</p></div><span class="muted">{{ stats.apps?.length || 0 }} 个应用</span></div><div class="table-wrap"><table><thead><tr><th>应用</th><th>状态</th><th class="number">活跃访客</th><th class="number">会话</th><th class="number">页面浏览</th><th>最近事件</th><th></th></tr></thead><tbody><tr v-for="app in stats.apps || []" :key="app.id"><td><button class="text-link" @click="navigate('overview', app.id)">{{ app.name }}</button><small class="cell-sub">{{ app.type === 'web' ? 'Web 应用' : '桌面应用' }}</small></td><td><span class="badge" :class="app.enabled ? 'green' : 'gray'">{{ app.enabled ? '已启用' : '已停用' }}</span></td><td class="number">{{ format(app.active) }}</td><td class="number">{{ format(app.sessions) }}</td><td class="number">{{ format(app.page_views) }}</td><td class="muted">{{ when(app.last_event_at) }}</td><td><button class="text-link" @click="navigate('overview', app.id)">详情 →</button></td></tr><tr v-if="!stats.apps?.length"><td colspan="7" class="table-empty">还没有应用，点击「新建应用」开始接入。</td></tr></tbody></table></div></section>
         </template>
@@ -142,6 +169,6 @@ onBeforeUnmount(() => { window.removeEventListener('sakura:unauthorized', expire
       <footer>Sakura Statistics<span>轻量记录 · 用心洞察</span></footer>
     </main></div>
     <div v-if="notice" class="toast" role="status">{{ notice }}</div>
-    <div v-if="newOpen" class="modal-backdrop" @click.self="!busy && (newOpen = false)"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="create-title"><div class="section-heading"><div><span class="eyebrow">NEW APPLICATION</span><h2 id="create-title">新建应用</h2></div><button class="close" aria-label="关闭" :disabled="busy" @click="newOpen = false">×</button></div><form @submit.prevent="createApp"><label>应用名称<input v-model="draft.name" autofocus required maxlength="120" placeholder="例如：Sakura 官网" /></label><label>应用类型<select v-model="draft.type"><option value="web">Web 应用</option><option value="desktop">桌面应用</option></select></label><label>允许的来源（allowed_origins）<textarea v-model="draft.origins" rows="3" placeholder="https://example.com&#10;http://localhost:5173"></textarea></label><p class="muted form-hint">每行一个 HTTP(S) origin，不含路径，最多 50 个。Web 应用必须配置网站来源，否则采集会被拒绝；桌面应用无 Origin 时可留空。</p><p v-if="formError" class="alert error" role="alert">{{ formError }}</p><div class="modal-actions"><button type="button" class="button" :disabled="busy" @click="newOpen = false">取消</button><button class="primary" :disabled="busy">{{ busy ? '正在创建…' : '创建应用' }}</button></div></form></section></div>
+    <div v-if="newOpen && canCreateApp" class="modal-backdrop" @click.self="!busy && (newOpen = false)"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="create-title"><div class="section-heading"><div><span class="eyebrow">NEW APPLICATION</span><h2 id="create-title">新建应用</h2></div><button class="close" aria-label="关闭" :disabled="busy" @click="newOpen = false">×</button></div><form @submit.prevent="createApp"><label>应用名称<input v-model="draft.name" autofocus required maxlength="120" placeholder="例如：Sakura 官网" /></label><label>应用类型<select v-model="draft.type"><option value="web">Web 应用</option><option value="desktop">桌面应用</option></select></label><label>允许的来源（allowed_origins）<textarea v-model="draft.origins" rows="3" placeholder="https://example.com&#10;http://localhost:5173"></textarea></label><p class="muted form-hint">每行一个 HTTP(S) origin，不含路径，最多 50 个。Web 应用必须配置网站来源，否则采集会被拒绝；桌面应用无 Origin 时可留空。</p><p v-if="formError" class="alert error" role="alert">{{ formError }}</p><div class="modal-actions"><button type="button" class="button" :disabled="busy" @click="newOpen = false">取消</button><button class="primary" :disabled="busy">{{ busy ? '正在创建…' : '创建应用' }}</button></div></form></section></div>
   </div>
 </template>

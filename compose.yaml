@@ -39,6 +39,35 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  frontend:
+    image: ${SAKURA_FRONTEND_IMAGE:-ghcr.io/guyao146/sakura-statistics-gateway-web:v0.1.1}
+    profiles: ["frontend"]
+    ports:
+      - "127.0.0.1:8081:80"
+    # The image runs as nginx, not root, while retaining the internal port 80.
+    sysctls:
+      net.ipv4.ip_unprivileged_port_start: "0"
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 128m
+    cpus: "0.50"
+    pids_limit: 64
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/api/status"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      app:
+        condition: service_healthy
+    restart: unless-stopped
+
   caddy:
     image: caddy:2-alpine
     profiles: ["https"]

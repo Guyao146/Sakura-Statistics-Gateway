@@ -4,7 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       image:
-        description: Published image tag or digest
+        description: Published app image tag or digest
+        required: true
+        type: string
+      frontend_image:
+        description: Published frontend image tag or digest from the same release
         required: true
         type: string
 
@@ -17,9 +21,13 @@ jobs:
     runs-on: ubuntu-latest
     env:
       SAKURA_IMAGE: ${{ inputs.image }}
-      COMPOSE_PROJECT_NAME: sakura-verification
+      SAKURA_FRONTEND_IMAGE: ${{ inputs.frontend_image }}
+      COMPOSE_PROJECT_NAME: sakura-verification-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
+      - name: Select temporary verification config
+        shell: bash
+        run: printf 'VERIFY_ENV_FILE=%s/sakura-verification.env\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -28,27 +36,30 @@ jobs:
       - name: Configure isolated deployment
         shell: bash
         run: |
+          set -euo pipefail
           database_password=$(openssl rand -hex 24)
           admin_password="Test-Aa1!$(openssl rand -hex 24)"
-          echo "::add-mask::$database_password"
-          echo "::add-mask::$admin_password"
+          printf '::add-mask::%s\n' "$database_password" "$admin_password"
+          umask 077
           {
             printf 'POSTGRES_USER=sakura\nPOSTGRES_DB=sakura\n'
             printf 'POSTGRES_PASSWORD=%s\n' "$database_password"
             printf 'DATABASE_URL=postgres://sakura:%s@postgres:5432/sakura?sslmode=disable\n' "$database_password"
             printf 'ADMIN_USERNAME=verification\nADMIN_PASSWORD=%s\n' "$admin_password"
             printf 'SESSION_SECURE=false\nPUBLIC_ORIGIN=http://127.0.0.1:8080\n'
-          } > .env
-      - name: Pull and start Compose
+          } > "$VERIFY_ENV_FILE"
+      - name: Pull and start default monolithic Compose
+        shell: bash
         run: |
-          docker compose pull
-          docker compose up -d --wait --wait-timeout 180
-      - name: Verify static assets and statistics
+          set -euo pipefail
+          docker compose --env-file "$VERIFY_ENV_FILE" -f compose.yaml pull
+          docker compose --env-file "$VERIFY_ENV_FILE" -f compose.yaml up -d --wait --wait-timeout 180
+      - name: Verify monolithic HTTP assets and statistics
         shell: bash
         run: |
           python - <<'PY'
-          import datetime, http.cookiejar, json, pathlib, urllib.request, uuid
-          config = dict(line.split('=', 1) for line in pathlib.Path('.env').read_text().splitlines() if '=' in line)
+          import datetime, http.cookiejar, json, os, pathlib, urllib.request, uuid
+          config = dict(line.split('=', 1) for line in pathlib.Path(os.environ['VERIFY_ENV_FILE']).read_text().splitlines() if '=' in line)
           base = 'http://127.0.0.1:8080'
           opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
           def request(path, body=None):
@@ -58,12 +69,15 @@ jobs:
                   headers['Origin'] = base
               req = urllib.request.Request(base + path, data=data, headers=headers)
               with opener.open(req, timeout=15) as response:
+                  assert response.headers.get_content_type() == 'application/json', path
                   return json.load(response)
-          assert request('/readyz')['database'] == 'ok'
-          for path, marker in [('/', b'<html'), ('/sdk.js', b'SakuraStats')]:
+          for path in ['/readyz', '/api/status']:
+              assert request(path)['database'] == 'ok'
+          for path, marker, types in [('/', b'<html', {'text/html'}), ('/sdk.js', b'SakuraStats', {'application/javascript', 'text/javascript'})]:
               with opener.open(base + path, timeout=15) as response:
+                  assert response.headers.get_content_type() in types, path
                   assert marker in response.read(), path
-          request('/api/auth/login', {'username': config['ADMIN_USERNAME'], 'password': config['ADMIN_PASSWORD']})
+          assert request('/api/auth/login', {'username': config['ADMIN_USERNAME'], 'password': config['ADMIN_PASSWORD']})['username'] == config['ADMIN_USERNAME']
           app = request('/api/apps', {'name': '[Synthetic deployment verification]', 'type': 'desktop', 'allowed_origins': []})['app']
           event = {'schema_version': 1, 'event_id': str(uuid.uuid4()), 'event_type': 'app_start', 'occurred_at': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'anonymous_id': str(uuid.uuid4()), 'session_id': str(uuid.uuid4()), 'platform': 'linux', 'app_version': 'deployment-check'}
           payload = {'app_id': app['id'], 'events': [event]}
@@ -72,11 +86,98 @@ jobs:
           totals = request('/api/apps/' + app['id'] + '/stats')['totals']
           assert totals['active'] == 1 and totals['starts'] == 1 and totals['new_visitors'] == 1 and totals['sessions'] == 0, totals
           request('/api/auth/logout', {})
-          print('Published image: Compose readiness, frontend, SDK, login, collection, retry and statistics verified.')
+          print('Published app image: HTTP readiness, static assets, SDK, login, collection, retry and statistics verified.')
+          PY
+      - name: Start frontend profile with its exact public origin
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, pathlib
+          path = pathlib.Path(os.environ['VERIFY_ENV_FILE'])
+          config = path.read_text()
+          old = 'PUBLIC_ORIGIN=http://127.0.0.1:8080\n'
+          assert config.count(old) == 1
+          path.write_text(config.replace(old, 'PUBLIC_ORIGIN=http://127.0.0.1:8081\n'))
+          PY
+          docker compose --env-file "$VERIFY_ENV_FILE" -f compose.yaml --profile frontend pull frontend
+          docker compose --env-file "$VERIFY_ENV_FILE" -f compose.yaml --profile frontend up -d --wait --wait-timeout 180
+      - name: Verify frontend HTTP guide assets and API proxy
+        shell: bash
+        run: |
+          python - <<'PY'
+          import http.cookiejar, json, os, pathlib, re, urllib.error, urllib.parse, urllib.request
+          config = dict(line.split('=', 1) for line in pathlib.Path(os.environ['VERIFY_ENV_FILE']).read_text().splitlines() if '=' in line)
+          base = 'http://127.0.0.1:8081'
+          opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+          def request(path, body=None, origin=base):
+              data = None if body is None else json.dumps(body).encode()
+              req = urllib.request.Request(base + path, data=data, headers={'Content-Type': 'application/json', 'Origin': origin})
+              with opener.open(req, timeout=15) as response:
+                  assert response.headers.get_content_type() == 'application/json', path
+                  return json.load(response)
+          for path in ['/readyz', '/api/status']:
+              state = request(path)
+              assert state['status'] == 'ok' and state['database'] == 'ok', (path, state)
+          with opener.open(base + '/', timeout=15) as response:
+              assert response.headers.get_content_type() == 'text/html'
+              html = response.read().decode('utf-8')
+              assert '<html' in html.lower()
+          # Follow actual same-origin Vite imports, including lazy chunks; no assumed chunk name.
+          refs = re.findall(r'''(?:src|href)=["']([^"']+)["']''', html)
+          pending = [urllib.parse.urljoin(base + '/', ref) for ref in refs]
+          seen = set()
+          marker = 'Sakura Statistics Gateway 接入指南'.encode('utf-8')
+          guide_found = False
+          while pending:
+              url = pending.pop()
+              parsed = urllib.parse.urlsplit(url)
+              if parsed.netloc != urllib.parse.urlsplit(base).netloc or parsed.scheme != 'http' or not parsed.path.startswith('/assets/') or not parsed.path.endswith(('.js', '.css')) or url in seen:
+                  continue
+              seen.add(url)
+              assert len(seen) <= 256, 'Unexpected asset graph size'
+              with opener.open(url, timeout=15) as response:
+                  expected = {'application/javascript', 'text/javascript'} if parsed.path.endswith('.js') else {'text/css'}
+                  assert response.headers.get_content_type() in expected, url
+                  body = response.read()
+              guide_found = guide_found or marker in body
+              if parsed.path.endswith('.js'):
+                  imports = re.findall(r'''["']((?:\.{1,2}/|/?assets/)[^"'\\\s]+\.js)["']''', body.decode('utf-8'))
+                  for ref in imports:
+                      pending.append(urllib.parse.urljoin(base + '/' if ref.startswith('assets/') else url, ref))
+          assert seen and guide_found, 'Built guide content is missing from reachable frontend assets'
+          with opener.open(base + '/sdk.js', timeout=15) as response:
+              assert response.headers.get_content_type() in {'application/javascript', 'text/javascript'}
+              assert b'SakuraStats' in response.read()
+          try:
+              opener.open(base + '/assets/__deployment_check_missing__.js', timeout=15)
+          except urllib.error.HTTPError as error:
+              assert error.code == 404
+          else:
+              raise AssertionError('A missing script must not return the SPA HTML')
+          credentials = {'username': config['ADMIN_USERNAME'], 'password': config['ADMIN_PASSWORD']}
+          try:
+              request('/api/auth/login', credentials, origin='http://127.0.0.1:8080')
+          except urllib.error.HTTPError as error:
+              assert error.code == 403 and json.load(error)['error']['code'] == 'origin_forbidden'
+          else:
+              raise AssertionError('The previous monolithic origin must be rejected after switching to the frontend origin')
+          assert request('/api/auth/login', credentials)['username'] == config['ADMIN_USERNAME']
+          assert request('/api/auth/me')['username'] == config['ADMIN_USERNAME']
+          apps = request('/api/apps')['apps']
+          assert any(app['name'] == '[Synthetic deployment verification]' for app in apps), 'Data was not retained across app recreation'
+          request('/api/auth/logout', {})
+          print(f'Published frontend image: {len(seen)} HTTP assets, built guide content, SDK MIME, JSON readiness, proxied Cookie login and Origin rejection verified; no browser/GUI test was run.')
           PY
       - name: Diagnostics
         if: failure()
-        run: docker compose logs --tail=80
+        shell: bash
+        run: docker compose --env-file "$VERIFY_ENV_FILE" -f compose.yaml --profile frontend logs --tail=80
       - name: Remove isolated verification containers
         if: always()
-        run: docker compose down -v
+        shell: bash
+        run: |
+          if [[ -f "$VERIFY_ENV_FILE" ]]; then
+            docker compose --env-file "$VERIFY_ENV_FILE" -f compose.yaml --profile frontend down -v
+            rm -f "$VERIFY_ENV_FILE"
+          fi

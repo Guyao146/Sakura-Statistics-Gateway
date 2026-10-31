@@ -13,7 +13,7 @@ let observer: ResizeObserver | undefined
 function render() {
   chart?.setOption({
     color: ['#7664df', '#43ac9c', '#eeae5c'],
-    tooltip: { trigger: 'axis', confine: true },
+    tooltip: { trigger: 'axis', confine: true, backgroundColor: '#fff', borderColor: '#eceef5', textStyle: { color: '#303448', fontSize: 12 }, padding: [10, 14] },
     legend: { top: 0, right: 0, icon: 'circle', itemWidth: 8, textStyle: { color: '#7b8192' } },
     grid: { top: 48, left: 48, right: 18, bottom: 30 },
     xAxis: { type: 'category', boundaryGap: false, data: props.daily.map(d => d.date), axisLine: { lineStyle: { color: '#e9eaf1' } }, axisTick: { show: false }, axisLabel: { color: '#9298aa', formatter: (s: string) => s.slice(5) } },

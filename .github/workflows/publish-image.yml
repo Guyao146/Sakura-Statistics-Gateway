@@ -1,4 +1,4 @@
-name: Publish container image
+name: Publish container images
 
 on:
   push:
@@ -19,10 +19,16 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
-      - name: Select image name
+      - name: Select versioned image names
         id: image
         shell: bash
-        run: printf 'name=ghcr.io/%s\n' "${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF_TYPE" != tag || ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][[:alnum:].-]+)?$ ]]; then
+            printf 'Publish from a version tag; for manual runs, select that tag.\n' >&2
+            exit 1
+          fi
+          printf 'name=ghcr.io/%s\nfrontend=ghcr.io/%s-web\n' "${GITHUB_REPOSITORY,,}" "${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
       - name: Set up emulation
         uses: docker/setup-qemu-action@v3
       - name: Set up Buildx
@@ -33,7 +39,7 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Container metadata
+      - name: App container metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
@@ -42,7 +48,16 @@ jobs:
           tags: |
             type=ref,event=tag
             type=sha,format=long
-      - name: Build and push
+      - name: Frontend container metadata
+        id: frontend_meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.frontend }}
+          flavor: latest=false
+          tags: |
+            type=ref,event=tag
+            type=sha,format=long
+      - name: Build and push app
         id: build
         uses: docker/build-push-action@v6
         with:
@@ -52,17 +67,38 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=app
+          cache-to: type=gha,scope=app,mode=max
+      - name: Build and push frontend
+        id: frontend_build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./web/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.frontend_meta.outputs.tags }}
+          labels: ${{ steps.frontend_meta.outputs.labels }}
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,scope=frontend,mode=max
       - name: Package deployment files
         shell: bash
+        env:
+          APP_IMAGE: ${{ steps.image.outputs.name }}
+          APP_DIGEST: ${{ steps.build.outputs.digest }}
+          FRONTEND_IMAGE: ${{ steps.image.outputs.frontend }}
+          FRONTEND_DIGEST: ${{ steps.frontend_build.outputs.digest }}
         run: |
+          set -euo pipefail
+          [[ "$APP_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$FRONTEND_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           mkdir -p deployment/docs deployment/scripts
           cp compose.yaml README.md deployment/
           cp docs/Caddyfile docs/*.md deployment/docs/
           cp scripts/backup.py scripts/restore.py deployment/scripts/
-          grep -v '^SAKURA_IMAGE=' .env.example > deployment/.env.example
-          printf '\nSAKURA_IMAGE=%s@%s\n' '${{ steps.image.outputs.name }}' '${{ steps.build.outputs.digest }}' >> deployment/.env.example
+          # Copy placeholders, never a machine's .env or generated credentials.
+          grep -Ev '^(SAKURA_IMAGE|SAKURA_FRONTEND_IMAGE)=' .env.example > deployment/.env.example
+          printf '\nSAKURA_IMAGE=%s@%s\nSAKURA_FRONTEND_IMAGE=%s@%s\n' "$APP_IMAGE" "$APP_DIGEST" "$FRONTEND_IMAGE" "$FRONTEND_DIGEST" >> deployment/.env.example
           tar -czf sakura-deployment.tar.gz -C deployment .
       - name: Upload deployment package
         uses: actions/upload-artifact@v4

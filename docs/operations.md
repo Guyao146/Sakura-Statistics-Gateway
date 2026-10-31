@@ -14,6 +14,23 @@ curl http://127.0.0.1:8080/readyz
 
 `pg_isready` 仅表明数据库接受连接，`/readyz` 进一步检查应用数据库连接。应用迁移失败、管理员配置不符合要求或静态文件缺失需要检查应用日志。不要将包含密码的完整 Compose 展开输出发送到公共讨论区。
 
+## 可选前端发布配置
+
+`v0.1.1` 计划新增独立前端镜像；发布、真实容器验收与浏览器检查状态以实际记录为准，本手册不把计划版本记为已验证。新版部署包 `.env.example` 分别固定 `SAKURA_IMAGE`、`SAKURA_FRONTEND_IMAGE` 的实际发布 digest，服务器复制到自己的 `.env` 后填独立密码；包中没有机器 `.env` 或真实凭据。不要在发布前使用计划标签，也不要猜 digest。
+
+基础 Compose 的 `frontend` 是可选 profile。普通部署与 `https` profile 仍由 app 提供内置管理台，Caddy 仍反代 `app:8080`；无需强制启动 frontend。使用独立前端时，先采用新 `compose.yaml`，把已发布的 `SAKURA_FRONTEND_IMAGE` 加到已有配置，保留密码/卷，并执行：
+
+```sh
+docker compose --profile frontend pull frontend
+docker compose --profile frontend up -d --wait
+curl http://127.0.0.1:8081/readyz
+curl http://127.0.0.1:8081/api/status
+```
+
+前端只绑定回环 `127.0.0.1:8081`，代理 API/SDK/readiness 到同一 app。已有宿主机 Nginx 的服务器应将公网域名整站代理到该回环端口，保留 Host/Origin，继续使用 HTTPS 和安全 Cookie；不会自动改写一般 Caddy HTTPS 配置。纯本机 HTTP 试用设 `PUBLIC_ORIGIN=http://127.0.0.1:8081`、`SESSION_SECURE=false`。一个 app 只有一个 `PUBLIC_ORIGIN`：不要期待 8080 和 8081 的管理写请求同时被允许。
+
+前端以非 root 运行，Compose 的非特权端口绑定设置保证容器内仍监听 80，不需要改后端监听架构；资源上限为 128 MiB、0.5 CPU、64 个进程，json-file 日志限为 3 × 5 MiB。healthcheck 检查 `/api/status`，`/readyz` 显式代理 JSON；健康状态不等于前端交互或 SDK 接入已完成验收。发布后的验证 workflow 只在独立 Actions 临时项目/配置中操作，不能从生产目录执行，也不代替 GUI 验证。
+
 ## 在线逻辑备份
 
 脚本在任何工作目录均可运行；相对输出路径相对于当前终端目录，父目录必须存在。生产备份文件包含事件、管理员密码哈希和会话表等数据，应限制访问并加密保存到独立存储。文件不得提交版本库。
@@ -55,11 +72,24 @@ curl http://127.0.0.1:8080/readyz
 
 ## 升级与回退
 
-1. 记录当前代码版本、镜像标识和配置，完成数据库备份，确认独立恢复演练结果。
+1. 记录当前代码版本、本体/前端镜像标识和配置，完成数据库备份，确认独立恢复演练结果；先检查共享主机磁盘余量，留出拉取与回退空间。
 2. 计划维护窗口；如需回退后零数据差异，应先停止应用再备份，避免备份后新增写入在回退中丢失。
-3. 将 `.env` 的 `SAKURA_IMAGE` 改成已经发布的新版本标签/digest，执行 `docker compose --profile https pull`，再执行 `docker compose --profile https up -d`，观察日志和 readiness。服务器不执行源码构建。
+3. 将 `.env` 的 `SAKURA_IMAGE` 改成已经发布的新版本标签/digest；启用独立前端时也固定同一发布或确认 API 兼容的 `SAKURA_FRONTEND_IMAGE`。默认 HTTPS 部署执行 `docker compose --profile https pull`、`docker compose --profile https up -d`；已有宿主机 Nginx 的前端部署使用 `--profile frontend`。观察日志和 readiness，服务器不执行源码构建。
 4. 后端启动会按文件名顺序、在事务和数据库锁保护下执行尚未应用的迁移。
 5. 若需回退，不假设旧应用兼容新模式。用升级前备份恢复到新的空库，部署匹配旧版本，再验证。
+
+仅更新接入指南或静态管理台时，保留现有 `SAKURA_IMAGE` 与生产配置，修改 `SAKURA_FRONTEND_IMAGE` 为实际发布且与现有 API 兼容的固定 digest，然后只拉取和替换 frontend：
+
+```sh
+docker compose --profile frontend pull frontend
+docker compose --profile frontend up -d --no-deps --wait frontend
+docker compose --profile frontend logs --tail=100 frontend
+curl http://127.0.0.1:8081/readyz
+```
+
+确认公网域名仍正确代理、管理台登录/指南与 `/sdk.js` 响应正常。若仅静态前端需要回退，改回记录的旧前端 digest，再执行相同 frontend 命令；这不回滚数据库。单体/Caddy 部署若未启用 frontend，更新站内指南仍需更新包含静态文件的本体镜像，不能仅改前端变量。
+
+共享服务器不要在线 build、执行无差别 `docker system prune`、删除回退镜像或清理其他项目目录以挤出空间；磁盘不足时先评估本项目明确可清理的对象并获得授权。常规升级绝不执行 `down -v`。
 
 没有自动 down migration，也无法保证数据库可原地降级。PostgreSQL 大版本升级需要单独的升级/导出导入方案，不能直接让新主版本挂载旧数据目录。当前 Compose 固定 PostgreSQL 16；镜像小版本更新也应先备份。
 
