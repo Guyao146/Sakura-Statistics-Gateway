@@ -42,4 +42,12 @@
 - Go 静态检查、Windows 和 Linux amd64 构建通过；Python 客户端 9 项、备份工具 5 项测试通过。
 - Compose、工作流 YAML、内嵌 Bash/Python 及接入指南语法和本地链接检查通过。
 
-远程 CI、已发布镜像的 Compose 验收和服务器升级仍待执行，不能由以上本地结果推断它们已经通过。本次未向生产库写入测试应用或事件；生产默认保留期为 `0`，不会自动启用删除。
+远程与服务器验证已完成：
+
+- [v0.2.0 CI 与双镜像发布](https://github.com/Guyao146/Sakura-Statistics-Gateway/actions/runs/41435475878)通过，包含 PostgreSQL 16 集成测试和 Linux race 检查。
+- [实际镜像 Compose 验收](https://github.com/Guyao146/Sakura-Statistics-Gateway/actions/runs/41436987083)通过，覆盖路径规则、自定义事件、采集指标、设置、重建、留存、删除，以及独立前端的登录代理和指南资源。
+- 2026-11-02 已备份并升级服务器前后端，PostgreSQL 容器及原数据卷未重建。升级前后均为 1 个应用、7 条事件，其余访客及每日汇总记录数量保持一致。
+- HTTPS IPv4 入口的登录、安全 Cookie、设置、采集指标、应用路径规则和自定义事件统计字段均通过验证。没有在生产库创建、删除或重建测试数据。
+- 生产 `RETENTION_DAYS=0`，自动清理关闭。配置和数据库备份位于服务器 `/opt/sakura-statistics-gateway/backups/v02-deploy-20261102T112918Z-b9fba0`，旧镜像保留供回退。
+
+本次没有修改 DNS，之前的错误 AAAA 分流仍需单独核对修正；以上公网验收明确针对服务器 IPv4。ARM 镜像已发布，但本次实际容器验收运行在 amd64。

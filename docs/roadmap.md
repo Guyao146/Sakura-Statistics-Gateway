@@ -16,13 +16,13 @@
 
 首次镜像发布需要代码仓库与镜像仓库身份；项目文件中的发布流程不会自动创建远程仓库或已经存在的可拉取镜像。
 
-## 已完成（v0.2.0 待发布）
+## 已完成（v0.2.0）
 
 - 数据管理：`RETENTION_DAYS` 保留期（默认关闭、启用须至少 7 天，后台分批清理原始事件）、`DELETE /api/apps/{id}` 级联删除应用数据、`POST /api/apps/{id}/rebuild` 范围重建聚合。
 - 运行监控：`GET /api/metrics` 采集量/拒收/限流计数、`GET /api/settings` 生效配置查看、`/api/status` 版本字段、采集限流参数显式配置（`RATE_LIMIT_PER_SECOND`、`RATE_LIMIT_BURST`）。
 - 统计增强：`custom` 自定义事件（web/desktop 均可，`invalid_event_name` 校验，计入日活与 `daily_metrics.custom_events`）、周留存接口（`GET /api/apps/{id}/retention?weeks=1–12`）、页面路径数字段归一化与前缀白名单（`normalize_numeric_paths`、`allowed_path_prefixes`）。
 
-以上为 v0.2.0 待发布内容，验证状态以 CI 运行记录为准（见[验证记录](validation.md)），发布前不视为已验证。
+以上内容已通过本地回归、远程 CI、实际镜像 Compose 验收及服务器升级验证，具体范围与限制见[验证记录](validation.md)。
 
 ## 下一阶段：持续运行能力
 

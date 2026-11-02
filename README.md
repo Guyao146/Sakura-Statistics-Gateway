@@ -8,9 +8,9 @@ v0.2.0 新增数据管理能力：可在管理 API 中删除应用、配置数�
 
 代码已公开于 [GitHub 仓库](https://github.com/Guyao146/Sakura-Statistics-Gateway)。镜像 `ghcr.io/guyao146/sakura-statistics-gateway` 已发布，包含 `linux/amd64`、`linux/arm64`，可匿名拉取，无需登录 GHCR。首次发布和实际 Compose 集成验收均已成功，详见[验证记录](docs/validation.md)。
 
-固定首版 `v0.1.0` 的部署入口：[Release 页面](https://github.com/Guyao146/Sakura-Statistics-Gateway/releases/tag/v0.1.0)、[部署包下载](https://github.com/Guyao146/Sakura-Statistics-Gateway/releases/download/v0.1.0/sakura-deployment.tar.gz)。部署包配置使用对应镜像的固定 digest，避免后续标签变化影响部署。
+当前稳定版 **`v0.2.0`**：[Release 页面](https://github.com/Guyao146/Sakura-Statistics-Gateway/releases/tag/v0.2.0)、[部署包下载](https://github.com/Guyao146/Sakura-Statistics-Gateway/releases/download/v0.2.0/sakura-deployment.tar.gz)。部署包固定本体和前端镜像 digest，避免标签变化影响部署。
 
-本次计划发布 `v0.2.0`（待发布，发布完成后生效），提供可单独拉取的 `ghcr.io/guyao146/sakura-statistics-gateway-web` 前端镜像与站内接入指南。**以下首版发布记录不代表 v0.2.0 已发布或验收通过**；确认新版本发布成功后再使用它的部署包/实际镜像 digest。源码中的 `.env.example` 已指向计划版本，不能在发布前当作可拉取承诺。默认部署继续使用内置管理台的本体镜像，不强制启用独立前端。
+[v0.1.0 首版历史记录](https://github.com/Guyao146/Sakura-Statistics-Gateway/releases/tag/v0.1.0)保留供参考。`v0.2.0` 已通过 CI、实际 Compose 验收和服务器升级验证，详见[验证记录](docs/validation.md)。默认部署继续使用内置管理台的本体镜像，不强制启用独立前端。
 
 服务器只需 Docker Engine 和 Compose v2，**不需要下载源码、安装 Go/Node 或执行 build**。备份/恢复脚本另需 Python 3.9+。部署包包含 `compose.yaml`、`.env.example`、`docs/` 和 `scripts/`，不含 `examples/`、源码或 `compose.build.yaml`。
 
@@ -19,7 +19,7 @@ v0.2.0 新增数据管理能力：可在管理 API 中删除应用、配置数�
 ```sh
 mkdir -p sakura-deployment
 cd sakura-deployment
-curl -fL https://github.com/Guyao146/Sakura-Statistics-Gateway/releases/download/v0.1.0/sakura-deployment.tar.gz -o sakura-deployment.tar.gz
+curl -fL https://github.com/Guyao146/Sakura-Statistics-Gateway/releases/download/v0.2.0/sakura-deployment.tar.gz -o sakura-deployment.tar.gz
 tar -xzf sakura-deployment.tar.gz
 cp .env.example .env
 ```
