@@ -1,6 +1,6 @@
 # Python 通用 HTTP 客户端示例
 
-Python 3.9+，仅标准库，无 pip 依赖。示例适配管理台创建的 **desktop** 应用（启用状态），发送 `app_start` 与 `active`。其他语言和桌面框架尚未接入；网页已有独立的 [/sdk.js 接入文档](../../docs/web-sdk.md)。`web` 应用需浏览器 Origin 白名单和 page_view 生命周期，不能把本示例当作浏览器 SDK。
+Python 3.9+，仅标准库，无 pip 依赖。示例适配管理台创建的 **desktop** 应用（启用状态），发送 `app_start`、`active`，并可调用 `track_custom()` 上报自定义事件。其他语言和桌面框架尚未接入；网页已有独立的 [/sdk.js 接入文档](../../docs/web-sdk.md)，但网页 SDK 暂不支持自定义事件。`web` 应用需浏览器 Origin 白名单和 page_view 生命周期，不能把本示例当作浏览器 SDK。
 
 ```sh
 python examples/python/demo.py --endpoint http://127.0.0.1:8080 --app-id YOUR_DESKTOP_APP_ID
@@ -27,6 +27,10 @@ telemetry = Client(
 def on_real_user_action():
     telemetry.mark_active()
 
+# 在业务动作实际完成的回调中调用一次，例如导出成功、任务完成。
+def on_export_completed():
+    telemetry.track_custom("export_completed")
+
 # 程序退出时调用，不在退出路径发起同步网络请求。
 telemetry.close()
 ```
@@ -36,6 +40,7 @@ telemetry.close()
 - `anonymous_id` 首次创建后存入 SQLite，后续复用；`session_id` 每次进程启动生成一次，进程内不变。
 - 每个状态目录/应用在进程内首次构造时尝试入队一次 `app_start`。启动并不自动创建 `active`。队列满时本次启动可能丢弃，不会谎称可靠送达。
 - `mark_active()` 必须由真实使用触发。同统计日 5 分钟内合并，跨统计日首次交互立即入队，不因前一天的合并窗口遗漏。计时使用单调时钟，日界使用统计时区。
+- `track_custom(name)` 上报一条 `custom` 事件：`name` 即协议 `event_name`，须为 1–64 字节、不含控制字符且非全空白；不满足时服务端按 `invalid_event_name` 单条拒绝，计入 `rejected_count`。每次调用独立入队一条事件（独立 `event_id`），没有 `mark_active()` 那样的 5 分钟合并窗口，不要在循环或高频定时器中调用。`custom` 事件计入日活，并按日累计到 `daily_metrics.custom_events`；不携带 `path`，也不支持附加属性。
 - 默认统计时区为固定 UTC+8，与服务端默认 Asia/Shanghai 一致。更换服务端时区时应传入匹配的 `datetime.tzinfo`；可用标准库 `zoneinfo.ZoneInfo`，但系统需有该时区数据。改变服务端时区不会重算已有事件。
 - 默认队列上限 10,000 条；满时拒绝新事件，保留原有队列，并增加 `overflow_count`。此上限约束行数，不是 SQLite 文件字节上限；SQLite 页面、WAL、业务字符串长度仍占空间，路径不可写/磁盘已满时本地入队可抛异常，宿主应按自身错误处理策略处理。
 - 后台 daemon 线程批量发送，每批默认 100 条。网络失败、HTTP 错误或不完整确认保留原始事件 ID/时间/内容，指数退避加 jitter，最大约 60 秒。新事件不会绕过失败退避。

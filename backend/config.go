@@ -16,7 +16,11 @@ type Config struct {
 	Addr, DatabaseURL, Username, Password, StaticDir, PublicOrigin string
 	Timezone                                                       *time.Location
 	SecureCookie                                                   bool
+	RetentionDays                                                  int
+	RateLimitPerSecond, RateLimitBurst                             int
 }
+
+const ServerVersion = "0.2.0"
 
 func loadConfig() (Config, error) {
 	c := Config{Addr: listenAddr(), DatabaseURL: os.Getenv("DATABASE_URL"), Username: os.Getenv("ADMIN_USERNAME"), Password: os.Getenv("ADMIN_PASSWORD"), StaticDir: env("STATIC_DIR", "./web/dist"), PublicOrigin: os.Getenv("PUBLIC_ORIGIN"), SecureCookie: true}
@@ -30,6 +34,29 @@ func loadConfig() (Config, error) {
 		if e != nil || n < 1 || n > 65535 {
 			return c, errors.New("PORT must be between 1 and 65535")
 		}
+	}
+	if v := os.Getenv("RETENTION_DAYS"); v != "" {
+		n, e := strconv.Atoi(v)
+		if e != nil || n < 0 || (n > 0 && n < 7) {
+			return c, errors.New("RETENTION_DAYS must be 0 (disabled) or an integer of at least 7")
+		}
+		c.RetentionDays = n
+	}
+	c.RateLimitPerSecond = 2
+	if v := os.Getenv("RATE_LIMIT_PER_SECOND"); v != "" {
+		n, e := strconv.Atoi(v)
+		if e != nil || n < 1 || n > 1000 {
+			return c, errors.New("RATE_LIMIT_PER_SECOND must be an integer between 1 and 1000")
+		}
+		c.RateLimitPerSecond = n
+	}
+	c.RateLimitBurst = 60
+	if v := os.Getenv("RATE_LIMIT_BURST"); v != "" {
+		n, e := strconv.Atoi(v)
+		if e != nil || n < 1 || n > 10000 {
+			return c, errors.New("RATE_LIMIT_BURST must be an integer between 1 and 10000")
+		}
+		c.RateLimitBurst = n
 	}
 	c.Timezone, err = time.LoadLocation(env("STATISTICS_TIMEZONE", "Asia/Shanghai"))
 	if err != nil {

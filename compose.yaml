@@ -26,6 +26,9 @@ services:
       STATISTICS_TIMEZONE: ${STATISTICS_TIMEZONE:-Asia/Shanghai}
       STATIC_DIR: /app/web/dist
       PORT: "8080"
+      RETENTION_DAYS: ${RETENTION_DAYS:-0}
+      RATE_LIMIT_PER_SECOND: ${RATE_LIMIT_PER_SECOND:-2}
+      RATE_LIMIT_BURST: ${RATE_LIMIT_BURST:-60}
     ports:
       - "127.0.0.1:8080:8080"
     healthcheck:
@@ -40,7 +43,7 @@ services:
     restart: unless-stopped
 
   frontend:
-    image: ${SAKURA_FRONTEND_IMAGE:-ghcr.io/guyao146/sakura-statistics-gateway-web:v0.1.2}
+    image: ${SAKURA_FRONTEND_IMAGE:-ghcr.io/guyao146/sakura-statistics-gateway-web:v0.2.0}
     profiles: ["frontend"]
     ports:
       - "127.0.0.1:8081:80"

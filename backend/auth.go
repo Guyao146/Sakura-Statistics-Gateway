@@ -42,7 +42,8 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		fail(w, 403, "origin_forbidden", "A matching Origin or Referer is required")
 		return
 	}
-	if !s.limit.allow("login", time.Now()) {
+	// Login keeps its fixed budget regardless of the collect rate limit configuration.
+	if !s.limit.allow("login", time.Now(), 2, 60) {
 		fail(w, 429, "rate_limited", "Too many login attempts")
 		return
 	}

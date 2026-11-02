@@ -5,6 +5,7 @@ node_modules/
 web/dist/
 backend/server
 backend/server.exe
+backend/backend.exe
 *.log
 __pycache__/
 *.py[cod]

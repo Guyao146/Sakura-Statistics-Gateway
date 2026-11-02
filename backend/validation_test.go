@@ -15,7 +15,7 @@ func validEvent(now time.Time) Event {
 func TestValidateEventAndPrivacy(t *testing.T) {
 	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
 	event := validEvent(now)
-	if code, _ := validateEvent(&event, "web", now); code != "" {
+	if code, _ := validateEvent(&event, &App{Type: "web"}, now); code != "" {
 		t.Fatal(code)
 	}
 	if event.Path != "/docs" {
@@ -23,7 +23,7 @@ func TestValidateEventAndPrivacy(t *testing.T) {
 	}
 	event = validEvent(now)
 	event.EventType = "active"
-	if code, _ := validateEvent(&event, "web", now); code != "" || event.Path != "" {
+	if code, _ := validateEvent(&event, &App{Type: "web"}, now); code != "" || event.Path != "" {
 		t.Fatalf("active event retained path: %+v", event)
 	}
 }
@@ -51,10 +51,99 @@ func TestValidationBoundaries(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			e := validEvent(now)
 			tc.mutate(&e)
-			if code, _ := validateEvent(&e, tc.kind, now); code != tc.code {
+			if code, _ := validateEvent(&e, &App{Type: tc.kind}, now); code != tc.code {
 				t.Fatalf("got %q want %q", code, tc.code)
 			}
 		})
+	}
+}
+func TestCustomEventNameValidation(t *testing.T) {
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	app := &App{Type: "desktop"}
+	cases := []struct {
+		name string
+		code string
+	}{
+		{"", "invalid_event_name"},
+		{"   ", "invalid_event_name"},
+		{"\t\n", "invalid_event_name"},
+		{strings.Repeat("x", 65), "invalid_event_name"},
+		{"bad\nname", "invalid_event_name"},
+		{strings.Repeat("x", 64), ""},
+		{"signup", ""},
+		{"支付完成", ""},
+	}
+	for _, tc := range cases {
+		e := validEvent(now)
+		e.EventType = "custom"
+		e.Path = "/ignored"
+		e.EventName = tc.name
+		if code, _ := validateEvent(&e, app, now); code != tc.code {
+			t.Fatalf("name %q: got %q want %q", tc.name, code, tc.code)
+		}
+		if tc.code == "" && (e.Path != "" || e.EventName != tc.name) {
+			t.Fatalf("custom must drop path and keep name: %+v", e)
+		}
+	}
+	// Non-custom events never store an event_name.
+	e := validEvent(now)
+	e.EventName = "ignored"
+	if code, _ := validateEvent(&e, &App{Type: "web"}, now); code != "" || e.EventName != "" {
+		t.Fatalf("page_view retained event_name: %+v", e)
+	}
+}
+func TestPathNormalizationAndPrefixes(t *testing.T) {
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	app := &App{Type: "web", NormalizeNumericPaths: true, AllowedPathPrefixes: []string{"/docs/", "/users/"}}
+	e := validEvent(now)
+	e.Path = "/users/123/orders/0042?x=1#f"
+	if code, _ := validateEvent(&e, app, now); code != "" || e.Path != "/users/:id/orders/:id" {
+		t.Fatalf("normalize: %q %q", code, e.Path)
+	}
+	e.Path = "/docs/v2026/release"
+	if code, _ := validateEvent(&e, app, now); code != "" || e.Path != "/docs/v2026/release" {
+		t.Fatalf("mixed segment must stay: %q %q", code, e.Path)
+	}
+	e.Path = "/other/page"
+	if code, _ := validateEvent(&e, app, now); code != "invalid_path" {
+		t.Fatalf("prefix miss: %q", code)
+	}
+	app.NormalizeNumericPaths = false
+	e.Path = "/docs/123"
+	if code, _ := validateEvent(&e, app, now); code != "" || e.Path != "/docs/123" {
+		t.Fatalf("no normalization: %q %q", code, e.Path)
+	}
+	if got := normalizeNumericPaths("/a//007/b"); got != "/a//:id/b" {
+		t.Fatal(got)
+	}
+}
+func TestPathPrefixRules(t *testing.T) {
+	out, ok := normalizePathPrefixes([]string{"/b", "/a", "/b", "/a/"})
+	if !ok || len(out) != 3 || out[0] != "/b" || out[1] != "/a" || out[2] != "/a/" {
+		t.Fatalf("dedupe: %q %v", out, ok)
+	}
+	empty, ok := normalizePathPrefixes(nil)
+	if !ok || empty == nil || len(empty) != 0 {
+		t.Fatalf("empty: %q %v", empty, ok)
+	}
+	bad := [][]string{{"no-slash"}, {"//double"}, {""}, {"/" + strings.Repeat("a", 256)}, {"/ctrl\n"}}
+	for _, prefixes := range bad {
+		if _, ok := normalizePathPrefixes(prefixes); ok {
+			t.Fatalf("accepted invalid prefixes: %q", prefixes)
+		}
+	}
+	many := make([]string, 51)
+	for i := range many {
+		many[i] = "/" + strings.Repeat("x", i+1)
+	}
+	if _, ok := normalizePathPrefixes(many); ok {
+		t.Fatal("accepted 51 unique prefixes")
+	}
+	if _, ok := normalizePathPrefixes(many[:50]); !ok {
+		t.Fatal("rejected 50 unique prefixes")
+	}
+	if out, ok := normalizePathPrefixes([]string{"/" + strings.Repeat("a", 255)}); !ok || len(out[0]) != 256 {
+		t.Fatalf("256-byte boundary: %v %v", out, ok)
 	}
 }
 func TestOrigins(t *testing.T) {
@@ -112,6 +201,51 @@ func TestConfigEnvironmentPriority(t *testing.T) {
 		t.Fatal("invalid port accepted")
 	}
 }
+func TestConfigV02Validation(t *testing.T) {
+	base := func() {
+		t.Setenv("DATABASE_URL", "postgres://localhost/test")
+		t.Setenv("ADMIN_USERNAME", "admin")
+		t.Setenv("ADMIN_PASSWORD", "StrongPass123!")
+		t.Setenv("RETENTION_DAYS", "")
+		t.Setenv("RATE_LIMIT_PER_SECOND", "")
+		t.Setenv("RATE_LIMIT_BURST", "")
+	}
+	base()
+	c, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.RetentionDays != 0 || c.RateLimitPerSecond != 2 || c.RateLimitBurst != 60 {
+		t.Fatalf("defaults: %+v", c)
+	}
+	for _, value := range []string{"6", "-1", "abc", "3.5"} {
+		t.Setenv("RETENTION_DAYS", value)
+		if _, err := loadConfig(); err == nil {
+			t.Fatalf("RETENTION_DAYS=%s accepted", value)
+		}
+	}
+	t.Setenv("RETENTION_DAYS", "7")
+	if c, err = loadConfig(); err != nil || c.RetentionDays != 7 {
+		t.Fatalf("RETENTION_DAYS=7: %+v %v", c, err)
+	}
+	for name, invalid := range map[string][]string{
+		"RATE_LIMIT_PER_SECOND": {"0", "1001", "abc", "-2"},
+		"RATE_LIMIT_BURST":      {"0", "10001", "abc", "-2"},
+	} {
+		for _, value := range invalid {
+			t.Setenv(name, value)
+			if _, err := loadConfig(); err == nil {
+				t.Fatalf("%s=%s accepted", name, value)
+			}
+		}
+		t.Setenv(name, "")
+	}
+	t.Setenv("RATE_LIMIT_PER_SECOND", "1000")
+	t.Setenv("RATE_LIMIT_BURST", "10000")
+	if c, err = loadConfig(); err != nil || c.RateLimitPerSecond != 1000 || c.RateLimitBurst != 10000 {
+		t.Fatalf("upper bounds: %+v %v", c, err)
+	}
+}
 func TestStrongPassword(t *testing.T) {
 	for _, password := range []string{"", "password", "LongPassword123", "longpassword!123", strings.Repeat("A", 73) + "a1!"} {
 		if strongPassword(password) {
@@ -167,23 +301,30 @@ func TestBoundedLimiter(t *testing.T) {
 	l := limiter{}
 	now := time.Now()
 	for i := 0; i < 60; i++ {
-		if !l.allow("app", now) {
+		if !l.allow("app", now, 2, 60) {
 			t.Fatal(i)
 		}
 	}
-	if l.allow("app", now) {
+	if l.allow("app", now, 2, 60) {
 		t.Fatal("burst exceeded")
 	}
-	if !l.allow("app", now.Add(time.Second)) {
+	if !l.allow("app", now.Add(time.Second), 2, 60) {
 		t.Fatal("tokens did not refill")
 	}
 	for i := 0; i < 4096; i++ {
 		l.entries[string(rune(i))] = bucket{at: now}
 	}
-	if l.allow("another", now) {
+	if l.allow("another", now, 2, 60) {
 		t.Fatal("map cap exceeded")
 	}
-	if !l.allow("another", now.Add(11*time.Minute)) {
+	if !l.allow("another", now.Add(11*time.Minute), 2, 60) {
 		t.Fatal("stale keys not evicted")
+	}
+	custom := limiter{}
+	if !custom.allow("k", now, 1, 1) || custom.allow("k", now, 1, 1) {
+		t.Fatal("custom budget: one request per second expected")
+	}
+	if !custom.allow("k", now.Add(time.Second), 1, 1) {
+		t.Fatal("custom budget did not refill")
 	}
 }

@@ -2,13 +2,15 @@
 
 Go 后端、Vue + Vite 管理台和 PostgreSQL 16 组成的轻量统计服务。第一版在采集请求的数据库事务中写入事件并增量维护汇总，提交成功后返回确认；没有后台消费队列。管理台通过 HttpOnly Cookie 登录，应用 ID 用于选择统计应用，不是密钥。
 
+v0.2.0 新增数据管理能力：可在管理 API 中删除应用、配置数据保留期并按需触发聚合重建。提供运行指标与限流配置：`/api/metrics` 暴露运行指标，保留期与令牌桶限流通过 `RETENTION_DAYS`、`RATE_LIMIT_PER_SECOND`、`RATE_LIMIT_BURST` 环境变量调整。支持自定义事件与留存分析：事件可携带 `event_name` 并提供按周留存查询；网页 SDK 暂不支持自定义事件。
+
 ## 首次部署
 
 代码已公开于 [GitHub 仓库](https://github.com/Guyao146/Sakura-Statistics-Gateway)。镜像 `ghcr.io/guyao146/sakura-statistics-gateway` 已发布，包含 `linux/amd64`、`linux/arm64`，可匿名拉取，无需登录 GHCR。首次发布和实际 Compose 集成验收均已成功，详见[验证记录](docs/validation.md)。
 
 固定首版 `v0.1.0` 的部署入口：[Release 页面](https://github.com/Guyao146/Sakura-Statistics-Gateway/releases/tag/v0.1.0)、[部署包下载](https://github.com/Guyao146/Sakura-Statistics-Gateway/releases/download/v0.1.0/sakura-deployment.tar.gz)。部署包配置使用对应镜像的固定 digest，避免后续标签变化影响部署。
 
-本次计划发布 `v0.1.2`（待发布），提供可单独拉取的 `ghcr.io/guyao146/sakura-statistics-gateway-web` 前端镜像与站内接入指南。**以下首版发布记录不代表 v0.1.2 已发布或验收通过**；确认新版本发布成功后再使用它的部署包/实际镜像 digest。源码中的 `.env.example` 已指向计划版本，不能在发布前当作可拉取承诺。默认部署继续使用内置管理台的本体镜像，不强制启用独立前端。
+本次计划发布 `v0.2.0`（待发布，发布完成后生效），提供可单独拉取的 `ghcr.io/guyao146/sakura-statistics-gateway-web` 前端镜像与站内接入指南。**以下首版发布记录不代表 v0.2.0 已发布或验收通过**；确认新版本发布成功后再使用它的部署包/实际镜像 digest。源码中的 `.env.example` 已指向计划版本，不能在发布前当作可拉取承诺。默认部署继续使用内置管理台的本体镜像，不强制启用独立前端。
 
 服务器只需 Docker Engine 和 Compose v2，**不需要下载源码、安装 Go/Node 或执行 build**。备份/恢复脚本另需 Python 3.9+。部署包包含 `compose.yaml`、`.env.example`、`docs/` 和 `scripts/`，不含 `examples/`、源码或 `compose.build.yaml`。
 
@@ -55,7 +57,7 @@ curl http://127.0.0.1:8080/readyz
 
 `frontend` profile 适用于已由宿主机 Nginx 等服务管理 HTTPS 的服务器，或需要独立更新管理台/接入指南的部署。它从发布镜像提供静态站点，并将 `/api/`、`/sdk.js`、`/readyz` 代理到 `app:8080`，不是第二套后端或数据库。默认 `docker compose up -d` 不启动它，现有本体 `127.0.0.1:8080` 与 `https` profile 的 Caddy → `app:8080` 保持不变；启用 frontend 不会自动改写 Caddy。
 
-确认 `v0.1.2` 或后续对应版本的两个镜像均已发布，采用该版本部署包的 `compose.yaml`，并将包内实际 `SAKURA_FRONTEND_IMAGE=ghcr.io/guyao146/sakura-statistics-gateway-web@sha256:…` 复制到现有 `.env`；省略号不是可执行 digest。保留已有密码、数据库配置和卷，不要用新模板覆盖生产 `.env`。前端变量有计划版本回退值，避免关闭 profile 时 Compose 插值失败，但生产仍应显式固定已发布 digest。
+确认 `v0.2.0` 或后续对应版本的两个镜像均已发布，采用该版本部署包的 `compose.yaml`，并将包内实际 `SAKURA_FRONTEND_IMAGE=ghcr.io/guyao146/sakura-statistics-gateway-web@sha256:…` 复制到现有 `.env`；省略号不是可执行 digest。保留已有密码、数据库配置和卷，不要用新模板覆盖生产 `.env`。前端变量有计划版本回退值，避免关闭 profile 时 Compose 插值失败，但生产仍应显式固定已发布 digest。
 
 本机 HTTP 使用前端时将 `.env` 设为 `PUBLIC_ORIGIN=http://127.0.0.1:8081`、`SESSION_SECURE=false`，然后执行：
 
@@ -85,9 +87,9 @@ curl http://127.0.0.1:8081/readyz
 
 仓库的 `.github/workflows/publish-image.yml` 由 `v[0-9]*` 标签推送触发，也支持手动选择版本标签运行（不从普通分支发布）。发布前先执行 CI（Go、真实 PostgreSQL 16 集成测试、race、前端与 Python 测试），通过后才构建并推送本体和独立前端两个 `linux/amd64`、`linux/arm64` 镜像。工作流使用 GitHub 自带的 `GITHUB_TOKEN`（`contents: read`、`packages: write`）登录 GHCR，不需要额外 registry 密码；自行发布时须确保仓库或组织允许 Actions/Packages 写入。
 
-本体路径取 `github.repository` 的小写形式，前端路径在其后加 `-web`；两者均发布版本标签（如 `v0.1.2`）和 `sha-完整提交SHA` 标签，没有默认 `latest`。Actions 的 `sakura-deployment` 产物内含 `sakura-deployment.tar.gz`，包内 `.env.example` 将 `SAKURA_IMAGE`、`SAKURA_FRONTEND_IMAGE` 分别固定为该次发布的实际 digest，仅含密码占位符，不打包机器 `.env`、真实密码或机器配置。以实际发布输出为准，不要猜测标签或 digest。
+本体路径取 `github.repository` 的小写形式，前端路径在其后加 `-web`；两者均发布版本标签（如 `v0.2.0`）和 `sha-完整提交SHA` 标签，没有默认 `latest`。Actions 的 `sakura-deployment` 产物内含 `sakura-deployment.tar.gz`，包内 `.env.example` 将 `SAKURA_IMAGE`、`SAKURA_FRONTEND_IMAGE` 分别固定为该次发布的实际 digest，仅含密码占位符，不打包机器 `.env`、真实密码或机器配置。以实际发布输出为准，不要猜测标签或 digest。
 
-发布后可手动运行 `.github/workflows/verify-deployment.yml`，填写同一版本的两个镜像 tag/digest。它在独立 Actions 项目/临时配置中先验收 8080 单体的 readiness、SDK、Cookie 登录、采集去重与统计，再把 `PUBLIC_ORIGIN` 切到 8081，启用 frontend profile 检查实际 JS 资产中的指南内容、API/SDK 代理、JSON readiness、Cookie 登录及错误 Origin 拒绝；最终删除该隔离环境的卷。此项仅为 HTTP/容器验收，**不是浏览器渲染、点击或隐藏 GUI 验证**，不能在生产目录运行或据此提前宣称新版本通过。
+发布后可手动运行 `.github/workflows/verify-deployment.yml`，填写同一版本的两个镜像 tag/digest。它在独立 Actions 项目/临时配置中先验收 8080 单体的 readiness、SDK、Cookie 登录、采集去重与统计，以及路径规则、自定义事件、运行指标、设置、聚合重建、留存查询与应用删除，再把 `PUBLIC_ORIGIN` 切到 8081，启用 frontend profile 检查实际 JS 资产中的指南内容、API/SDK 代理、JSON readiness、Cookie 登录、错误 Origin 拒绝与 `/api/settings`；最终删除该隔离环境的卷。此项仅为 HTTP/容器验收，**不是浏览器渲染、点击或隐藏 GUI 验证**，不能在生产目录运行或据此提前宣称新版本通过。
 
 本项目的 GHCR 镜像已公开，可匿名拉取。自行发布的包若为私有，可改为公开或为自己的服务器另配读取凭据；不要把 Actions 的临时 `GITHUB_TOKEN` 当作长期服务器登录密码。服务器使用部署包执行前文的 `docker compose --profile https pull` / `up -d` 即可，基础 Compose 没有 build 字段。
 
@@ -194,4 +196,4 @@ python scripts/restore.py backups-before-upgrade.dump --confirm-empty-database s
 
 客户端自报事件不能证明真实用户、真实安装或授权状态。UUID、防重复和 Origin 校验只解决部分工程问题，无法鉴别伪造的客户端事件。不要据此计算计费、考勤或其他需要可信证明的记录。
 
-身份按应用和匿名安装 ID 统计，不做跨应用、跨端或跨设备合并。重装、清除数据、更换状态目录会产生新的身份；复制状态目录会共享身份。已包含网页 SDK `/sdk.js` 和 Python 通用 HTTP 示例；其他语言/桌面框架尚待接入。当前没有自动保留期、删除清理任务、同意管理 UI 或导出工作流。原始事件和汇总会持续增长，运维需监控磁盘和数据库容量。不要擅自删除原始事件：这会破坏去重、版本/页面明细或重建能力。第一版未实现聚合重建与保留期管理。
+身份按应用和匿名安装 ID 统计，不做跨应用、跨端或跨设备合并。重装、清除数据、更换状态目录会产生新的身份；复制状态目录会共享身份。已包含网页 SDK `/sdk.js` 和 Python 通用 HTTP 示例；其他语言/桌面框架尚待接入。当前没有同意管理 UI 或导出工作流；删除应用、数据保留期与聚合重建已由 v0.2.0 提供（见文首功能说明）。原始事件和汇总会持续增长，运维需监控磁盘和数据库容量，必要时通过数据保留期控制规模。不要用 SQL 擅自删除原始事件：这会破坏去重与页面/版本明细；清理历史数据或修复汇总应使用保留期配置与聚合重建接口。

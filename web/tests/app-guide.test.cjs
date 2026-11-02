@@ -11,7 +11,7 @@ const { JSDOM } = require('jsdom');
 const appSource = fs.readFileSync(path.join(__dirname, '../src/App.vue'), 'utf8');
 const { descriptor } = parse(appSource);
 const script = descriptor.scriptSetup.content;
-const stateNames = 'view, guideSection, selectedId, selected, stats, apps, status, loading, error, actionError, title, headingLabel, headingDescription, canCreateApp, newOpen, notice, copied, from, to, rangeError, navigate, openGuide, load, copyText, copyGuideCode';
+const stateNames = 'view, guideSection, selectedId, selected, stats, apps, status, settings, collect, loading, error, actionError, title, headingLabel, headingDescription, canCreateApp, newOpen, notice, copied, from, to, rangeError, navigate, openGuide, load, copyText, copyGuideCode, cards, busy, rebuildOpen, rebuildFrom, rebuildTo, rebuildError, openRebuild, confirmRebuild, deleteOpen, deleteName, deleteError, canDelete, openDelete, confirmDelete, retention, retentionToday, retentionCell, format, when';
 const compiled = ts.transpileModule(`${script}\nexport { ${stateNames} };`, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
 }).outputText;
@@ -48,6 +48,19 @@ function app(options = {}) {
       if (name === './guide') return { guideSections: { web: 'guide-网页接入', desktop: 'guide-桌面客户端接入' } };
       if (name === './api') return {
         api, getStatus: () => api('/status'), ApiError: class ApiError extends Error {},
+        getSettings: options.getSettings || (() => api('/settings')),
+        getMetrics: options.getMetrics || (() => api('/metrics')),
+        getRetention: async () => ({ weeks: 4, cohorts: [] }),
+        rebuildApp: options.rebuildApp || (() => { throw new Error('Unexpected rebuild'); }),
+        deleteApp: options.deleteApp || (() => { throw new Error('Unexpected deletion'); }),
+        deleteConfirmationMatches: (name, input) => name !== '' && name === input,
+        dateInTimezone: date => date.toISOString().slice(0, 10),
+        retentionWeekState: (cohort, index, today) => {
+          const start = Date.parse(cohort) + index * 7 * 86400000;
+          const day = Date.parse(today);
+          return start > day ? 'future' : day < start + 7 * 86400000 ? 'current' : 'complete';
+        },
+        formatRetentionCell: (count, size) => !size || count == null ? '—' : `${count} (${Math.round(count * 100 / size)}%)`,
         message: e => e.message, localDate: date => date.toISOString().slice(0, 10),
         rangeDays: (from, to) => (Date.parse(to) - Date.parse(from)) / 86400000 + 1,
       };
@@ -169,4 +182,75 @@ test('failed Clipboard promises do not report success and select code for manual
   assert.equal(result, false); assert.equal(state.notice.value, '');
   assert.match(state.actionError.value, /手动复制/);
   assert.equal(state.dom.window.getSelection().toString(), '手动复制的代码');
+});
+
+test('rebuild confirmation captures dates and waits for the response', async () => {
+  const response = pending(); const calls = [];
+  const state = app({
+    api: async route => route.includes('/stats?') ? { daily: [], totals: {} } : { app: { id: 'app-one', name: '示例网站', type: 'web', allowed_path_prefixes: [] } },
+    rebuildApp: (...args) => { calls.push(args); return response.promise; },
+  });
+  state.selectedId.value = 'app-one'; state.selected.value = { id: 'app-one', name: '示例网站' };
+  state.from.value = '2026-11-01'; state.to.value = '2026-11-02';
+  state.openRebuild();
+  assert.equal(state.rebuildOpen.value, true);
+  const operation = state.confirmRebuild();
+  assert.deepEqual(calls, [['app-one', '2026-11-01', '2026-11-02']]);
+  assert.equal(state.busy.value, true); assert.equal(state.notice.value, '');
+  response.resolve({ rebuilt_days: 2, events: 4, visitors: 2 });
+  await operation;
+  assert.equal(state.rebuildOpen.value, false); assert.equal(state.busy.value, false);
+  assert.match(state.notice.value, /已重建 2 天统计/);
+});
+
+test('a protected rebuild retains the dialog without a success notice', async () => {
+  const state = app({ rebuildApp: async () => { throw new Error('日期超出原始事件保留范围，无法安全重建'); } });
+  state.selected.value = { id: 'app-one', name: '示例网站' };
+  state.openRebuild();
+  await state.confirmRebuild();
+  assert.equal(state.rebuildOpen.value, true); assert.equal(state.busy.value, false);
+  assert.match(state.rebuildError.value, /无法安全重建/);
+  assert.equal(state.notice.value, '');
+});
+
+test('delete requires the exact name before sending a request', async () => {
+  const calls = [];
+  const state = app({ api: async () => ({ apps: [] }), deleteApp: async id => { calls.push(id); return { ok: true }; } });
+  state.selected.value = { id: 'app-one', name: '示例网站' };
+  state.openDelete(); state.deleteName.value = '错误名称';
+  await state.confirmDelete();
+  assert.deepEqual(calls, []); assert.equal(state.deleteOpen.value, true);
+  state.deleteName.value = '示例网站';
+  await state.confirmDelete();
+  assert.deepEqual(calls, ['app-one']); assert.equal(state.deleteOpen.value, false);
+  assert.equal(state.view.value, 'apps'); assert.equal(state.notice.value, '应用已删除');
+});
+
+test('six overview metrics include custom events in the compiled UI', () => {
+  const state = app();
+  state.stats.value = { totals: { active: 1, starts: 1, sessions: 1, page_views: 1, new_visitors: 1, custom_events: 7 }, daily: [], apps: [] };
+  const articles = find(rendered(state, { cards: state.cards }), node => node.type === 'article');
+  assert.equal(articles.length, 6);
+  assert.match(articles.map(text).join(' '), /自定义事件/);
+  assert.match(text(articles[5]), /7/);
+});
+
+test('retention uses server dates and distinguishes ongoing and future weeks', () => {
+  const state = app();
+  state.retention.value = { weeks: 4, timezone: 'Asia/Shanghai', today: '2026-11-02', cohorts: [] };
+  const cohort = { cohort: '2026-10-26', size: 10, retained: [10, 3, 0, 0] };
+  assert.equal(state.retentionCell(cohort, 1), '10 (100%)');
+  assert.equal(state.retentionCell(cohort, 2), '3 (30%) · 进行中');
+  assert.equal(state.retentionCell(cohort, 3), '—');
+});
+
+test('stale status responses do not start more requests after entering guide', async () => {
+  const response = pending(); let extra = 0;
+  const state = app({ api: () => response.promise, getSettings: async () => { extra++; return {}; }, getMetrics: async () => { extra++; return {}; } });
+  state.view.value = 'status';
+  const operation = state.load();
+  await state.navigate('guide');
+  response.resolve({ status: 'ok', database: 'ok' });
+  await operation;
+  assert.equal(extra, 0); assert.equal(state.view.value, 'guide');
 });

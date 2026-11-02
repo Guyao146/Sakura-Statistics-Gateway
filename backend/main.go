@@ -43,6 +43,18 @@ func run() error {
 	srv := &http.Server{Addr: cfg.Addr, Handler: s.handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
 	shutdownCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if cfg.RetentionDays > 0 {
+		retentionCtx, cancelRetention := context.WithCancel(shutdownCtx)
+		retentionDone := make(chan struct{})
+		go func() {
+			defer close(retentionDone)
+			s.purgeLoop(retentionCtx)
+		}()
+		defer func() {
+			cancelRetention()
+			<-retentionDone
+		}()
+	}
 	errs := make(chan error, 1)
 	go func() {
 		slog.Info("server listening", "addr", cfg.Addr, "timezone", cfg.Timezone.String())

@@ -1,6 +1,6 @@
 # Sakura Statistics Gateway 接入指南
 
-本文说明如何把网站和桌面客户端接入统一统计服务，适用于当前 `v0.1.0` 采集协议和 SDK。核对日期：2026-10-31。
+本文说明如何把网站和桌面客户端接入统一统计服务，适用于当前 `v0.2.0` 采集协议和 SDK。核对日期：2026-11-02。
 
 > **统计服务地址：`https://web.mcylyr.cn`。** 接入端只需要应用 ID，不需要后台管理员密码。不要把管理员密码、服务器密码或后台 Cookie 放进网页、客户端配置或上报请求。
 
@@ -105,7 +105,7 @@ SDK 自动完成：
 | `data-timezone` | 否 | 默认 `Asia/Shanghai`，应与服务器统计时区一致；无效值回退默认时区 |
 | `data-hash-mode` | 否 | 仅值 `route` 开启 `#/...` hash 路由统计 |
 
-当前网页 SDK 固定上报 `platform="web"`、`sdk_version="0.1.0"`，**没有** `data-app-version`、`data-platform`、自定义事件或纯手动采集配置。不要添加不存在的属性来统计版本或业务按钮。
+当前网页 SDK 固定上报 `platform="web"` 与 SDK 自身版本号 `sdk_version`，**没有** `data-app-version`、`data-platform`、自定义事件或纯手动采集配置。不要添加不存在的属性来统计版本或业务按钮。
 
 ### 2.3 Vue / React 等 History 路由
 
@@ -211,6 +211,21 @@ connect-src 'self' https://web.mcylyr.cn;
 - 会话不因午夜自动拆分，后台将其归属到最早事件日。
 - 清除本地存储、换浏览器或访问不同 Origin 会得到不同访客身份；多个标签页共享存储但不存在原子事务，不能保证并发下完全不分裂会话。
 
+### 2.9 页面路径规则
+
+应用配置（创建和 PATCH 均为整体替换）新增两个字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `normalize_numeric_paths` | 布尔值。开启后路径中的纯数字段替换为 `:id`，如 `/users/123` 归一化为 `/users/:id` |
+| `allowed_path_prefixes` | 字符串数组，每项 1–256 字节、以 `/` 开头、不为 `//`，最多 50 项 |
+
+服务端按固定顺序处理 `page_view` 的 `path`：先去除 query/fragment，再做数字段归一化，最后检查白名单。`allowed_path_prefixes` 非空时，归一化后的路径必须以其中至少一项为前缀，否则该事件按 `invalid_path` 拒绝；白名单为空表示不限制。前缀匹配的是归一化后的路径，因此开启 `normalize_numeric_paths` 后前缀可直接写 `/users/`，无须逐个枚举 `/users/123` 这样的动态段。
+
+两项字段值不合法时，配置请求被拒绝并返回 `invalid_path_rules`。
+
+归一化只处理纯数字段：邮箱、令牌、字母数字混合 ID 等仍不会被替换，继续遵守第 4.1 节的隐私建议，不要把敏感值放进路径。
+
 ## 3. 桌面客户端接入
 
 ### 3.1 Python 示例：最短接入方式
@@ -311,6 +326,24 @@ def close_statistics():
 
 其他语言也可以直接使用下一节的 HTTP 协议。当前没有 C#、Electron、Qt 等框架专用 SDK，不要将 Python 示例误当成所有客户端已自动接入。
 
+### 3.3 自定义事件（桌面/HTTP）
+
+Python 客户端提供 `track_custom(name)`，上报一条 `custom` 业务事件：
+
+```python
+# 在业务动作实际完成的回调中调用一次，例如导出成功、任务完成。
+statistics.track_custom('export_completed')
+```
+
+校验规则与 HTTP 协议一致：
+
+- `name` 即协议字段 `event_name`：1–64 字节、不含控制字符且非全空白字符串；不满足时服务端按 `invalid_event_name` 单条拒绝。
+- 每次调用独立入队一条事件（独立 `event_id`），服务端按事件名分别计数，**没有 `mark_active()` 那样的 5 分钟合并窗口**；不要在循环或高频定时器中调用，避免制造无意义的事件量。
+- `custom` 事件计入日活，并按日累计到 `daily_metrics.custom_events`；不携带 `path`，不计入页面浏览，也不支持附加属性。
+- 事件名应使用稳定、无个人信息的技术标识，不要把用户输入原样作为事件名。
+
+**网页 SDK 暂不支持自定义事件**：SDK 只有 page_view/active，没有发送 `custom` 事件的接口。需要网页产品上报自定义事件时，当前受支持的方式只有按第 4 节协议自行构造 HTTP 请求（Web 应用须提供白名单 Origin），没有 SDK 方法可用。
+
 ## 4. 通用 HTTP 协议
 
 ### 4.1 请求格式
@@ -347,7 +380,8 @@ Content-Type: application/json
 | 顶层 `events` | 是 | 每批 1–500 条，请求体不超过 1 MiB |
 | `schema_version` | 是 | 整数 `1` |
 | `event_id` | 是 | 唯一事件 ID；重试保持不变 |
-| `event_type` | 是 | Desktop：`app_start`、`active`；Web：`page_view`、`active` |
+| `event_type` | 是 | Desktop：`app_start`、`active`、`custom`；Web：`page_view`、`active`、`custom` |
+| `event_name` | `custom` 必需 | 事件名：1–64 字节、无控制字符、非全空白；非法值按 `invalid_event_name` 拒绝 |
 | `occurred_at` | 是 | 带时区的 RFC3339 字符串，推荐 UTC `Z` |
 | `anonymous_id` | 是 | 安装或浏览器标识；正式接入须持久化 |
 | `session_id` | 是 | 本次运行/访问会话标识 |
@@ -358,9 +392,9 @@ Content-Type: application/json
 
 三个事件标识字段须为非空字符串，各 1–128 UTF-8 字节，不含控制字符；推荐使用 UUID。版本、平台字段也不能含控制字符。
 
-当前不支持 `custom` 事件、任意 `properties` 或通用 metadata 存储。不要依赖未定义字段进入统计。
+v0.2.0 起支持 `custom` 事件（见 3.3），仍不支持任意 `properties` 或通用 metadata 存储。不要依赖未定义字段进入统计。
 
-服务器会剔除页面路径中的 query 和 fragment，但**不会自动清理路径段**里的邮箱、用户 ID、令牌等敏感值。需要在业务侧做路径归一化，例如把 `/users/12345` 记录为 `/users/:id`。
+服务器会剔除页面路径中的 query 和 fragment，再按应用配置做数字段归一化与白名单检查（见 2.9）；但归一化**不会清理**路径段里的邮箱、令牌、字母数字混合 ID 等敏感值。未开启服务端归一化时仍需在业务侧处理，例如把 `/users/12345` 记录为 `/users/:id`。
 
 ### 4.2 身份、事件和时间
 
@@ -450,7 +484,7 @@ printf '%s' "$payload" | curl -sS --fail-with-body \
 
 首次应得到 `accepted=1`、`duplicates=0`、空拒绝列表。**只重复最后的 curl 发送，不重新生成 `payload`**，应得到 `accepted=0`、`duplicates=1`，后台启动数保持 1。
 
-该测试每次生成新的匿名标识，不能代替正式客户端的持久身份。Desktop 测试请求不带 `Origin`。Web 应用的直接 HTTP 测试则必须使用 `page_view`/`active` 和白名单中的真实 Origin，并为 `page_view` 提供路径。
+该测试每次生成新的匿名标识，不能代替正式客户端的持久身份。Desktop 测试请求不带 `Origin`。Web 应用的直接 HTTP 测试则必须使用 `page_view`/`active`/`custom` 和白名单中的真实 Origin，并为 `page_view` 提供路径。
 
 ## 5. 首次接入验收
 
@@ -463,6 +497,7 @@ printf '%s' "$payload" | curl -sS --fail-with-body \
 5. 后台选择该应用及当天日期，点击「查询」。
 6. 同一浏览器当天访问两个页面：通常日活 1、PV 2；五分钟合并期间不应按交互次数不断增长日活。
 7. SPA 路由切换应产生一次对应 PV，不应由自动和手动两套钩子双计。
+8. 为测试应用开启 `normalize_numeric_paths` 并访问 `/users/123`，确认后台明细显示 `/users/:id`；配置 `allowed_path_prefixes` 后访问白名单外路径，确认按 `invalid_path` 拒绝。
 
 Web 可能遇到拦截器、多标签并发和本地存储限制，测试时应控制这些条件，不把匿名标识等同于真实人数。
 
@@ -474,17 +509,19 @@ Web 可能遇到拦截器、多标签并发和本地存储限制，测试时应�
 4. 重复发送同一个事件，启动数不增加。
 5. 断网产生事件、恢复网络后确认重试；超过七天的补报会被拒绝。
 6. 核对应用版本和平台；默认未传版本时，后台可能显示「未知版本」。
-7. 测试后停用测试应用；当前没有后台删除历史数据功能，不要用生产应用反复发送合成数据。
+7. 调用一次 `track_custom('test_event')` 确认日活与自定义事件计数；再用非法事件名（如超 64 字节、全空白）确认 `invalid_event_name` 单条拒绝。
+8. 测试后停用测试应用，或在备份后用 `DELETE /api/apps/{id}` 删除测试应用及其全部数据；仍不要用生产应用反复发送合成数据。
 
 ## 6. 指标怎么理解
 
 | 指标 | 当前口径 |
 | --- | --- |
-| 当日日活 | 同应用、同统计日，产生任意合法事件的匿名标识去重数；启动和 PV 也计活跃 |
+| 当日日活 | 同应用、同统计日，产生任意合法事件的匿名标识去重数；启动、PV 和自定义事件也计活跃 |
 | 区间活跃 | 在整个查询区间对匿名标识去重，不是每日 DAU 相加 |
 | 启动次数 | 接受且不重复的 Desktop `app_start` 事件条数 |
 | 网站会话 | 每应用唯一 `session_id` 的数量，归属到已知最早事件日 |
 | 页面浏览 PV | 接受且不重复的 Web `page_view` 事件条数 |
+| 自定义事件 | 每应用每日有效 `custom` 事件条数；计入日活；当前仅桌面/HTTP 接入支持，网页 SDK 暂无发送接口 |
 | 新增访客 | 匿名标识的已知最早有效事件日在所选日期内的数量，不是注册人数 |
 | 总览活跃 | 各应用区间去重后相加，同一人在多应用中可能重复 |
 
@@ -504,7 +541,10 @@ Web 可能遇到拦截器、多标签并发和本地存储限制，测试时应�
 | 请求 200 但没有新增数据 | 查看 `rejected` 和 `duplicates`；不能只依据 HTTP 状态判断全部接收 |
 | `invalid_event_type` | 检查应用类型：网站不接收 `app_start`，Desktop 不接收 `page_view` |
 | `invalid_time` | 检查服务器/客户端时钟及 UTC 时区；过去七天、未来五分钟之外会拒绝 |
-| `invalid_path` | `page_view` 使用纯路径如 `/settings`，不是完整 URL，长度不超过 2048 字节 |
+| `invalid_path` | `page_view` 使用纯路径如 `/settings`，不是完整 URL，长度不超过 2048 字节；应用配置了 `allowed_path_prefixes` 时，归一化后的路径还须匹配某个前缀 |
+| `invalid_event_name` | `custom` 事件的 `event_name` 须为 1–64 字节、无控制字符且非全空白；网页 SDK 暂无自定义事件接口 |
+| `invalid_path_rules` | 应用配置中的 `normalize_numeric_paths`/`allowed_path_prefixes` 不合法：前缀每项 1–256 字节、以 `/` 开头、不为 `//`、最多 50 项 |
+| `invalid_weeks` | 留存接口的 `weeks` 参数须为 1–12 |
 | `400 invalid_json / invalid_batch` | 顶层字段、JSON 类型、每批数量和请求体大小须符合协议 |
 | `429 rate_limited` | 批量发送、减少请求频率并退避；同应用额度由所有接入端共享 |
 | SDK 未加载或无请求 | 检查 CSP、拦截器、脚本执行顺序、停用标记、页面是否可见，以及正确域名 |
@@ -523,7 +563,7 @@ Web 可能遇到拦截器、多标签并发和本地存储限制，测试时应�
 - 应用 ID 是公开标识，Origin 校验与限流不是客户端身份认证。
 - 不收集密码、令牌、用户输入或完整敏感 URL；页面路径和版本字段同样需要审查。
 - 更改统计时区不会自动重算历史日期，请不要在已有正式数据后随意修改。
-- 当前没有自动保留期、个人数据删除、聚合重建或自定义事件分析功能。
+- v0.2.0 提供保留期清理（`RETENTION_DAYS`）、应用级删除（`DELETE /api/apps/{id}`）与聚合重建（rebuild），均由管理员操作；仍没有按单人或单条事件的定向删除接口，自定义事件只做计数分析。
 - 队列有上限且浏览器可能拦截，上报不能代替业务数据库。
 - 备份和磁盘容量监控属于服务运维；SDK 接入不代表自动配置了备份任务。
 

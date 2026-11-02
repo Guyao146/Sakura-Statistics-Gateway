@@ -2,6 +2,8 @@
 
 构建后的服务提供 `/sdk.js`，源文件为 `web/public/sdk.js`。在管理台创建 **web** 应用，将网站的精确 Origin（含协议、主机、非默认端口，无尾部斜线）加入 `allowed_origins`，如 `https://www.example.com`。统计服务自身域名不等于访问网站的域名，白名单要填写实际载入脚本的页面 Origin。
 
+**当前 SDK 不支持自定义事件：只有 `page_view` 与 `active`，没有发送 `custom` 事件的接口。** 需要自定义事件只能使用桌面/HTTP 接入（见[统一接入指南](integration.md)）。
+
 ```html
 <script defer
   src="https://stats.example.com/sdk.js"
@@ -30,10 +32,10 @@ window.SakuraStats.trackPage('/settings');
 window.SakuraStats.flush();    // 返回 Promise；仍受退避与停用状态控制
 ```
 
-停用标记按应用保存在当前站点 localStorage，并通过 storage 事件同步其他标签页；存储不可用时无法跨刷新持久化。已发出并被服务端接受的请求无法撤回，disable 不会删除服务器历史数据。第一版没有服务端个人数据删除或保留期清理接口。
+停用标记按应用保存在当前站点 localStorage，并通过 storage 事件同步其他标签页；存储不可用时无法跨刷新持久化。已发出并被服务端接受的请求无法撤回，disable 不会删除服务器历史数据。服务端提供应用级删除与保留期清理（`DELETE /api/apps/{id}`、`RETENTION_DAYS`），均由管理员操作；SDK 没有撤回或删除单条已上报事件的接口。
 
 `trackPage(path?)` 是手动追加，不对连续手动调用去重。History 路由及显式 hash 路由已有自动监听，不要再为同一次导航调用该方法。`enable()` 从停用恢复时也会记录可见当前页。`flush()` 每次只尝试发送一批最多 30 条；Promise 完成不表示事件一定送达。
 
 若产品要求先同意后采集，应在获得同意后才插入 SDK script；脚本载入默认即会采集首次页面访问，加载后再 disable 不等同于事先阻止采集。可由产品设置 UI 调用 disable/enable，SDK 本身不提供同意管理 UI。
 
-采集按应用约 2 请求/秒、突发 60，众多浏览器或桌面安装共享该额度。示例适合第一版规模；并发接入前应评估容量，限流后客户端本地重试也不能保证不丢数据。所有客户端事件均为自报，Origin 校验不会证明事件真实性。
+采集按应用限流，默认约 2 请求/秒、突发 60（`RATE_LIMIT_PER_SECOND`/`RATE_LIMIT_BURST` 可调），众多浏览器或桌面安装共享该额度。示例适合第一版规模；并发接入前应评估容量，限流后客户端本地重试也不能保证不丢数据。所有客户端事件均为自报，Origin 校验不会证明事件真实性。

@@ -54,39 +54,89 @@ jobs:
           set -euo pipefail
           docker compose --env-file "$VERIFY_ENV_FILE" -f compose.yaml pull
           docker compose --env-file "$VERIFY_ENV_FILE" -f compose.yaml up -d --wait --wait-timeout 180
-      - name: Verify monolithic HTTP assets and statistics
+      - name: Verify monolithic HTTP assets, statistics and data management
         shell: bash
         run: |
           python - <<'PY'
-          import datetime, http.cookiejar, json, os, pathlib, urllib.request, uuid
+          import datetime, http.cookiejar, json, os, pathlib, urllib.error, urllib.request, uuid
           config = dict(line.split('=', 1) for line in pathlib.Path(os.environ['VERIFY_ENV_FILE']).read_text().splitlines() if '=' in line)
           base = 'http://127.0.0.1:8080'
           opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
-          def request(path, body=None):
+          collect_requests = 0
+          def request(path, body=None, method=None, collect_origin=False):
+              global collect_requests
               data = None if body is None else json.dumps(body).encode()
               headers = {'Content-Type': 'application/json'}
-              if path != '/api/collect':
+              if path != '/api/collect' or collect_origin:
                   headers['Origin'] = base
-              req = urllib.request.Request(base + path, data=data, headers=headers)
+              if path == '/api/collect':
+                  collect_requests += 1
+              req = urllib.request.Request(base + path, data=data, headers=headers, method=method)
               with opener.open(req, timeout=15) as response:
                   assert response.headers.get_content_type() == 'application/json', path
                   return json.load(response)
-          for path in ['/readyz', '/api/status']:
-              assert request(path)['database'] == 'ok'
-          for path, marker, types in [('/', b'<html', {'text/html'}), ('/sdk.js', b'SakuraStats', {'application/javascript', 'text/javascript'})]:
+          def fetch(path, types):
               with opener.open(base + path, timeout=15) as response:
                   assert response.headers.get_content_type() in types, path
-                  assert marker in response.read(), path
+                  return response.read()
+          def event(event_type, **extra):
+              payload = {'schema_version': 1, 'event_id': str(uuid.uuid4()), 'event_type': event_type, 'occurred_at': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'anonymous_id': str(uuid.uuid4()), 'session_id': str(uuid.uuid4()), 'platform': 'linux', 'app_version': 'deployment-check'}
+              payload.update(extra)
+              return payload
+          assert request('/readyz')['database'] == 'ok'
+          state = request('/api/status')
+          assert state['database'] == 'ok'
+          if 'version' in state:
+              assert isinstance(state['version'], str), state
+          assert b'<html' in fetch('/', {'text/html'})
+          assert b'SakuraStats' in fetch('/sdk.js', {'application/javascript', 'text/javascript'})
           assert request('/api/auth/login', {'username': config['ADMIN_USERNAME'], 'password': config['ADMIN_PASSWORD']})['username'] == config['ADMIN_USERNAME']
           app = request('/api/apps', {'name': '[Synthetic deployment verification]', 'type': 'desktop', 'allowed_origins': []})['app']
-          event = {'schema_version': 1, 'event_id': str(uuid.uuid4()), 'event_type': 'app_start', 'occurred_at': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'anonymous_id': str(uuid.uuid4()), 'session_id': str(uuid.uuid4()), 'platform': 'linux', 'app_version': 'deployment-check'}
-          payload = {'app_id': app['id'], 'events': [event]}
+          payload = {'app_id': app['id'], 'events': [event('app_start')]}
           assert request('/api/collect', payload)['accepted'] == 1
           assert request('/api/collect', payload)['duplicates'] == 1
           totals = request('/api/apps/' + app['id'] + '/stats')['totals']
           assert totals['active'] == 1 and totals['starts'] == 1 and totals['new_visitors'] == 1 and totals['sessions'] == 0, totals
+          assert request('/api/collect', {'app_id': app['id'], 'events': [event('custom', event_name='deployment_check')]})['accepted'] == 1
+          stats = request('/api/apps/' + app['id'] + '/stats')
+          assert stats['totals']['custom_events'] >= 1, stats['totals']
+          assert stats['custom_events'] and any('deployment_check' in json.dumps(item) for item in stats['custom_events']), stats['custom_events']
+          web_app = request('/api/apps', {'name': '[Synthetic path verification]', 'type': 'web', 'allowed_origins': [base], 'allowed_path_prefixes': ['/app/'], 'normalize_numeric_paths': True})['app']
+          assert web_app['allowed_path_prefixes'] == ['/app/'] and web_app['normalize_numeric_paths'] is True, web_app
+          assert request('/api/collect', {'app_id': web_app['id'], 'events': [event('page_view', path='/app/users/123')]}, collect_origin=True)['accepted'] == 1
+          stats = request('/api/apps/' + web_app['id'] + '/stats')
+          assert any(page['path'] == '/app/users/:id' and page['page_views'] >= 1 for page in stats['pages']), stats['pages']
+          result = request('/api/collect', {'app_id': web_app['id'], 'events': [event('page_view', path='/other/x')]}, collect_origin=True)
+          assert result['accepted'] == 0 and [item['code'] for item in result['rejected']] == ['invalid_path'], result
+          # /api/metrics aggregates per-application collect counters, so the lower bound counts collect calls only.
+          metrics = request('/api/metrics')
+          assert metrics['totals']['requests'] >= collect_requests, (metrics, collect_requests)
+          assert metrics['totals']['rejected'] >= 1, metrics
+          settings = request('/api/settings')
+          assert settings['retention_days'] == 0, settings
+          assert settings['rate_limit_per_second'] == 2 and settings['rate_limit_burst'] == 60, settings
+          # Compose defaults STATISTICS_TIMEZONE to Asia/Shanghai (UTC+8, no DST); events were just collected "today" there.
+          today = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).strftime('%Y-%m-%d')
+          assert request('/api/apps/%s/rebuild?from=%s&to=%s' % (app['id'], today, today), {}, method='POST')['rebuilt_days'] >= 1
+          retention = request('/api/apps/' + app['id'] + '/retention?weeks=4')
+          assert isinstance(retention['cohorts'], list), retention
+          for cohort in retention['cohorts']:
+              assert isinstance(cohort['retained'], list) and len(cohort['retained']) == 4, cohort
+          patched = request('/api/apps/' + web_app['id'], {'allowed_path_prefixes': ['/other/']}, method='PATCH')['app']
+          assert patched['allowed_path_prefixes'] == ['/other/'] and patched['normalize_numeric_paths'] is True, patched
+          result = request('/api/collect', {'app_id': web_app['id'], 'events': [event('page_view', path='/app/users/456')]}, collect_origin=True)
+          assert result['accepted'] == 0 and [item['code'] for item in result['rejected']] == ['invalid_path'], result
+          assert request('/api/collect', {'app_id': web_app['id'], 'events': [event('page_view', path='/other/y')]}, collect_origin=True)['accepted'] == 1
+          assert any(page['path'] == '/other/y' for page in request('/api/apps/' + web_app['id'] + '/stats')['pages'])
+          request('/api/apps/' + web_app['id'], {}, method='DELETE')
+          try:
+              request('/api/apps/' + web_app['id'])
+          except urllib.error.HTTPError as error:
+              assert error.code == 404 and json.load(error)['error']['code'] == 'app_not_found', error.code
+          else:
+              raise AssertionError('The deleted verification application must return 404 app_not_found')
           request('/api/auth/logout', {})
-          print('Published app image: HTTP readiness, static assets, SDK, login, collection, retry and statistics verified.')
+          print('Published app image: HTTP readiness, static assets, SDK, login, collection, retry, statistics, path rules, custom events, runtime metrics, settings, rebuild, retention and application deletion verified.')
           PY
       - name: Start frontend profile with its exact public origin
         shell: bash
@@ -106,7 +156,7 @@ jobs:
         shell: bash
         run: |
           python - <<'PY'
-          import http.cookiejar, json, os, pathlib, re, urllib.error, urllib.parse, urllib.request
+          import datetime, http.cookiejar, json, os, pathlib, re, urllib.error, urllib.parse, urllib.request, uuid
           config = dict(line.split('=', 1) for line in pathlib.Path(os.environ['VERIFY_ENV_FILE']).read_text().splitlines() if '=' in line)
           base = 'http://127.0.0.1:8081'
           opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
@@ -165,9 +215,15 @@ jobs:
           assert request('/api/auth/login', credentials)['username'] == config['ADMIN_USERNAME']
           assert request('/api/auth/me')['username'] == config['ADMIN_USERNAME']
           apps = request('/api/apps')['apps']
-          assert any(app['name'] == '[Synthetic deployment verification]' for app in apps), 'Data was not retained across app recreation'
+          assert any(entry['name'] == '[Synthetic deployment verification]' for entry in apps), 'Data was not retained across app recreation'
+          # The monolithic phase deletes its path-rule app; this phase creates and exercises its own app through the proxy.
+          app = request('/api/apps', {'name': '[Synthetic frontend verification]', 'type': 'web', 'allowed_origins': [base]})['app']
+          view = {'schema_version': 1, 'event_id': str(uuid.uuid4()), 'event_type': 'page_view', 'occurred_at': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'anonymous_id': str(uuid.uuid4()), 'session_id': str(uuid.uuid4()), 'platform': 'web', 'path': '/'}
+          assert request('/api/collect', {'app_id': app['id'], 'events': [view]})['accepted'] == 1
+          assert request('/api/apps/' + app['id'] + '/stats')['totals']['page_views'] == 1
+          assert isinstance(request('/api/settings'), dict)
           request('/api/auth/logout', {})
-          print(f'Published frontend image: {len(seen)} HTTP assets, built guide content, SDK MIME, JSON readiness, proxied Cookie login and Origin rejection verified; no browser/GUI test was run.')
+          print(f'Published frontend image: {len(seen)} HTTP assets, built guide content, SDK MIME, JSON readiness, proxied Cookie login and Origin rejection, self-created app collection and settings verified; no browser/GUI test was run.')
           PY
       - name: Diagnostics
         if: failure()

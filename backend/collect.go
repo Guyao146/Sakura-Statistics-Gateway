@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"github.com/jackc/pgx/v5"
@@ -22,6 +23,7 @@ type Event struct {
 	Platform      string    `json:"platform"`
 	SDKVersion    string    `json:"sdk_version"`
 	Path          string    `json:"path"`
+	EventName     string    `json:"event_name"`
 }
 type Rejection struct {
 	EventID string `json:"event_id"`
@@ -55,7 +57,53 @@ func cleanPath(path string) (string, bool) {
 	}
 	return u.EscapedPath(), true
 }
-func validateEvent(e *Event, kind string, now time.Time) (string, string) {
+
+// validEventName enforces 1–64 bytes of non-blank text without control characters.
+func validEventName(name string) bool {
+	if len(name) == 0 || len(name) > 64 || strings.TrimSpace(name) == "" {
+		return false
+	}
+	for _, r := range name {
+		if unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func isASCIIDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// normalizeNumericPaths replaces route segments made only of ASCII digits with ":id".
+func normalizeNumericPaths(path string) string {
+	segments := strings.Split(path, "/")
+	for i, segment := range segments {
+		if isASCIIDigits(segment) {
+			segments[i] = ":id"
+		}
+	}
+	return strings.Join(segments, "/")
+}
+
+func pathAllowed(prefixes []string, path string) bool {
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func validateEvent(e *Event, a *App, now time.Time) (string, string) {
 	if e.SchemaVersion != 1 {
 		return "invalid_schema", "schema_version must be 1"
 	}
@@ -71,12 +119,16 @@ func validateEvent(e *Event, kind string, now time.Time) (string, string) {
 	switch e.EventType {
 	case "active":
 	case "app_start":
-		if kind != "desktop" {
+		if a.Type != "desktop" {
 			return "invalid_event_type", "app_start is only valid for desktop applications"
 		}
 	case "page_view":
-		if kind != "web" {
+		if a.Type != "web" {
 			return "invalid_event_type", "page_view is only valid for web applications"
+		}
+	case "custom":
+		if !validEventName(e.EventName) {
+			return "invalid_event_name", "event_name must be 1–64 bytes of non-blank text without control characters"
 		}
 	default:
 		return "invalid_event_type", "Unknown event_type"
@@ -89,9 +141,18 @@ func validateEvent(e *Event, kind string, now time.Time) (string, string) {
 		if !ok {
 			return "invalid_path", "page_view requires an absolute path without a host"
 		}
+		if a.NormalizeNumericPaths {
+			path = normalizeNumericPaths(path)
+		}
+		if len(a.AllowedPathPrefixes) > 0 && !pathAllowed(a.AllowedPathPrefixes, path) {
+			return "invalid_path", "path is not covered by the allowed prefixes"
+		}
 		e.Path = path
 	} else {
 		e.Path = ""
+	}
+	if e.EventType != "custom" {
+		e.EventName = ""
 	}
 	return "", ""
 }
@@ -162,16 +223,38 @@ func (s *Server) collect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	origin := r.Header.Get("Origin")
+	// Every request for an existing application counts, so rejections commit their counters too.
+	opDay := time.Now().In(s.cfg.Timezone).Format("2006-01-02")
+	if err = bumpOperationMetrics(r.Context(), tx, a.ID, opDay, 1, 0, 0, 0, 0); err != nil {
+		s.internal(w, err)
+		return
+	}
 	if !originAllowed(a, origin) {
+		if err = tx.Commit(r.Context()); err != nil {
+			s.internal(w, err)
+			return
+		}
 		fail(w, 403, "origin_forbidden", "Origin is not allowed for this application")
 		return
 	}
 	cors(w, origin)
 	if !a.Enabled {
+		if err = tx.Commit(r.Context()); err != nil {
+			s.internal(w, err)
+			return
+		}
 		fail(w, 403, "app_disabled", "Application is disabled")
 		return
 	}
-	if !s.limit.allow("collect:"+a.ID, time.Now()) {
+	if !s.limit.allow("collect:"+a.ID, time.Now(), float64(s.cfg.RateLimitPerSecond), float64(s.cfg.RateLimitBurst)) {
+		if err = bumpOperationMetrics(r.Context(), tx, a.ID, opDay, 0, 0, 0, 0, 1); err != nil {
+			s.internal(w, err)
+			return
+		}
+		if err = tx.Commit(r.Context()); err != nil {
+			s.internal(w, err)
+			return
+		}
 		fail(w, 429, "rate_limited", "Too many requests")
 		return
 	}
@@ -187,13 +270,13 @@ func (s *Server) collect(w http.ResponseWriter, r *http.Request) {
 			result.Rejected = append(result.Rejected, Rejection{identity.EventID, "invalid_event", "Invalid event field type or timestamp"})
 			continue
 		}
-		code, message := validateEvent(&event, a.Type, now)
+		code, message := validateEvent(&event, &a, now)
 		if code != "" {
 			result.Rejected = append(result.Rejected, Rejection{event.EventID, code, message})
 			continue
 		}
 		day := event.OccurredAt.In(s.cfg.Timezone).Format("2006-01-02")
-		tag, e := tx.Exec(r.Context(), "INSERT INTO events(app_id,event_id,event_type,occurred_at,day,anonymous_id,session_id,app_version,platform,sdk_version,path) VALUES($1,$2,$3,$4,$5::text::date,$6,$7,$8,$9,$10,$11) ON CONFLICT(app_id,event_id) DO NOTHING", a.ID, event.EventID, event.EventType, event.OccurredAt, day, event.AnonymousID, event.SessionID, event.AppVersion, event.Platform, event.SDKVersion, event.Path)
+		tag, e := tx.Exec(r.Context(), "INSERT INTO events(app_id,event_id,event_type,occurred_at,day,anonymous_id,session_id,app_version,platform,sdk_version,path,event_name) VALUES($1,$2,$3,$4,$5::text::date,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(app_id,event_id) DO NOTHING", a.ID, event.EventID, event.EventType, event.OccurredAt, day, event.AnonymousID, event.SessionID, event.AppVersion, event.Platform, event.SDKVersion, event.Path, event.EventName)
 		if e != nil {
 			s.internal(w, e)
 			return
@@ -216,14 +299,16 @@ func (s *Server) collect(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		starts, pv := 0, 0
-		if event.EventType == "app_start" {
+		starts, pageViews, custom := 0, 0, 0
+		switch event.EventType {
+		case "app_start":
 			starts = 1
+		case "page_view":
+			pageViews = 1
+		case "custom":
+			custom = 1
 		}
-		if event.EventType == "page_view" {
-			pv = 1
-		}
-		if _, err = tx.Exec(r.Context(), "INSERT INTO daily_metrics(app_id,day,starts,page_views) VALUES($1,$2::text::date,$3,$4) ON CONFLICT(app_id,day) DO UPDATE SET starts=daily_metrics.starts+EXCLUDED.starts,page_views=daily_metrics.page_views+EXCLUDED.page_views", a.ID, day, starts, pv); err != nil {
+		if _, err = tx.Exec(r.Context(), "INSERT INTO daily_metrics(app_id,day,starts,page_views,custom_events) VALUES($1,$2::text::date,$3,$4,$5) ON CONFLICT(app_id,day) DO UPDATE SET starts=daily_metrics.starts+EXCLUDED.starts,page_views=daily_metrics.page_views+EXCLUDED.page_views,custom_events=daily_metrics.custom_events+EXCLUDED.custom_events", a.ID, day, starts, pageViews, custom); err != nil {
 			s.internal(w, err)
 			return
 		}
@@ -233,9 +318,26 @@ func (s *Server) collect(w http.ResponseWriter, r *http.Request) {
 		}
 		result.Accepted++
 	}
+	if err = bumpOperationMetrics(r.Context(), tx, a.ID, opDay, 0, int64(result.Accepted), int64(result.Duplicates), int64(len(result.Rejected)), 0); err != nil {
+		s.internal(w, err)
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		s.internal(w, err)
 		return
 	}
 	jsonResponse(w, 200, result)
+}
+
+// bumpOperationMetrics upserts the per-day request counters for one application.
+func bumpOperationMetrics(ctx context.Context, tx pgx.Tx, appID, day string, requests, accepted, duplicates, rejected, rateLimited int64) error {
+	_, err := tx.Exec(ctx, `INSERT INTO operation_metrics(app_id,day,requests,accepted,duplicates,rejected,rate_limited)
+VALUES($1,$2::text::date,$3,$4,$5,$6,$7)
+ON CONFLICT(app_id,day) DO UPDATE SET
+requests=operation_metrics.requests+EXCLUDED.requests,
+accepted=operation_metrics.accepted+EXCLUDED.accepted,
+duplicates=operation_metrics.duplicates+EXCLUDED.duplicates,
+rejected=operation_metrics.rejected+EXCLUDED.rejected,
+rate_limited=operation_metrics.rate_limited+EXCLUDED.rate_limited`, appID, day, requests, accepted, duplicates, rejected, rateLimited)
+	return err
 }

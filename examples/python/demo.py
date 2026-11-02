@@ -10,8 +10,13 @@ def main():
     parser.add_argument("--endpoint", default="http://127.0.0.1:8080")
     parser.add_argument("--app-id", required=True)
     parser.add_argument("--state-dir", type=Path, default=Path.home() / ".sakura-example")
+    parser.add_argument("--custom", metavar="NAME",
+                        help="also queue a custom event with NAME at startup")
     args = parser.parse_args()
     with Client(args.endpoint, args.app_id, args.state_dir, app_version="1.0.0", platform="python") as client:
+        if args.custom:
+            queued = client.track_custom(args.custom)
+            print(f"custom event queued={queued}; pending={client.pending}")
         print("A local startup event has been queued. Press Enter after actual interaction; q exits.")
         try:
             while input("> ").strip().lower() != "q":

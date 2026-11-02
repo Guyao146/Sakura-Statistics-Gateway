@@ -30,7 +30,7 @@ type limiter struct {
 	entries map[string]bucket
 }
 
-func (l *limiter) allow(key string, now time.Time) bool {
+func (l *limiter) allow(key string, now time.Time, perSecond, burst float64) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.entries == nil {
@@ -48,11 +48,11 @@ func (l *limiter) allow(key string, now time.Time) bool {
 				return false
 			}
 		}
-		b = bucket{tokens: 60, at: now}
+		b = bucket{tokens: burst, at: now}
 	}
-	b.tokens += now.Sub(b.at).Seconds() * 2
-	if b.tokens > 60 {
-		b.tokens = 60
+	b.tokens += now.Sub(b.at).Seconds() * perSecond
+	if b.tokens > burst {
+		b.tokens = burst
 	}
 	b.at = now
 	allowed := b.tokens >= 1
@@ -100,8 +100,13 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("POST /api/apps", s.admin(s.createApp))
 	mux.HandleFunc("GET /api/apps/{id}", s.admin(s.getApp))
 	mux.HandleFunc("PATCH /api/apps/{id}", s.admin(s.patchApp))
+	mux.HandleFunc("DELETE /api/apps/{id}", s.admin(s.deleteApp))
+	mux.HandleFunc("POST /api/apps/{id}/rebuild", s.admin(s.rebuildApp))
+	mux.HandleFunc("GET /api/apps/{id}/retention", s.admin(s.retention))
 	mux.HandleFunc("GET /api/stats/overview", s.admin(s.overview))
 	mux.HandleFunc("GET /api/apps/{id}/stats", s.admin(s.appStats))
+	mux.HandleFunc("GET /api/metrics", s.admin(s.operationMetrics))
+	mux.HandleFunc("GET /api/settings", s.admin(s.settings))
 	mux.HandleFunc("POST /api/collect", s.collect)
 	mux.HandleFunc("OPTIONS /api/collect", s.collectOptions)
 	mux.HandleFunc("/", s.static)
@@ -126,7 +131,10 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		database = "unavailable"
 		status = 503
 	}
-	jsonResponse(w, status, map[string]string{"status": state, "database": database, "time": time.Now().UTC().Format(time.RFC3339)})
+	jsonResponse(w, status, map[string]string{"status": state, "database": database, "time": time.Now().UTC().Format(time.RFC3339), "version": ServerVersion})
+}
+func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
+	jsonResponse(w, 200, map[string]any{"version": ServerVersion, "statistics_timezone": s.cfg.Timezone.String(), "retention_days": s.cfg.RetentionDays, "rate_limit_per_second": s.cfg.RateLimitPerSecond, "rate_limit_burst": s.cfg.RateLimitBurst})
 }
 func (s *Server) static(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, "/api/") || r.URL.Path == "/api" {

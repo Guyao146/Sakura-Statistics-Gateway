@@ -6,6 +6,7 @@ import random
 import sqlite3
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 import uuid
@@ -66,7 +67,7 @@ class Client:
             self._thread = threading.Thread(target=self._run, name="sakura-events", daemon=True)
             self._thread.start()
 
-    def _enqueue(self, event_type, *, now=None, path=None):
+    def _enqueue(self, event_type, *, now=None, path=None, event_name=None):
         now = now or self._clock()
         if now.tzinfo is None:
             raise ValueError("clock must return timezone-aware datetime")
@@ -76,7 +77,8 @@ class Client:
             "anonymous_id": self.anonymous_id, "session_id": self.session_id,
             "sdk_version": "python-example/1.0",
         }
-        for key, value in (("app_version", self.app_version), ("platform", self.platform), ("path", path)):
+        for key, value in (("app_version", self.app_version), ("platform", self.platform),
+                           ("path", path), ("event_name", event_name)):
             if value is not None:
                 event[key] = value
         with self._lock:
@@ -91,6 +93,27 @@ class Client:
                                  (self.app_id, event["event_id"], json.dumps(event)))
         self._wake.set()
         return True
+
+    @staticmethod
+    def valid_custom_name(name):
+        """Mirror the server rule: 1-64 UTF-8 bytes, not all whitespace, no control characters."""
+        if not isinstance(name, str):
+            return False
+        try:
+            raw = name.encode("utf-8")
+        except UnicodeEncodeError:
+            return False
+        if not 1 <= len(raw) <= 64:
+            return False
+        if not name.strip():
+            return False
+        return not any(unicodedata.category(ch) == "Cc" for ch in name)
+
+    def track_custom(self, name):
+        """Queue a custom event by name; every valid call is queued (no 5-minute coalescing)."""
+        if not Client.valid_custom_name(name):
+            return False
+        return self._enqueue("custom", event_name=name)
 
     def mark_active(self):
         """Call on real interaction; at most once per 5 min, plus first activity of a new day."""

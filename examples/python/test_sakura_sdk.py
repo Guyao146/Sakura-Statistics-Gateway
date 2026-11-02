@@ -113,6 +113,28 @@ class SDKTests(unittest.TestCase):
         self.assertFalse(client._thread.is_alive())
         self.assertTrue(client._db_closed)
 
+    def test_track_custom_validates_name_and_queues_every_call(self):
+        client = self.client()
+        self.assertTrue(client.track_custom("checkout_step"))
+        # No 5-minute coalescing: a second identical call is queued again.
+        self.assertTrue(client.track_custom("checkout_step"))
+        for bad in ("", "   ", "\t\n", "x" * 65, "控制\n字符", None, 42):
+            self.assertFalse(client.track_custom(bad), repr(bad))
+        self.assertTrue(client.track_custom("a" * 64))
+        self.assertFalse(client.track_custom("名" * 22))  # 66 UTF-8 bytes
+        self.assertTrue(client.track_custom("名" * 21))  # 63 UTF-8 bytes
+        self.assertEqual(client.pending, 5)
+
+    def test_track_custom_payload_reaches_transport_without_path(self):
+        attempts = []
+        client = self.client(transport=lambda p: attempts.append(p) or acknowledge(p))
+        self.assertTrue(client.track_custom("checkout_step"))
+        self.assertTrue(client.flush_once())
+        event = attempts[0]["events"][-1]
+        self.assertEqual(event["event_type"], "custom")
+        self.assertEqual(event["event_name"], "checkout_step")
+        self.assertNotIn("path", event)
+
 
 if __name__ == "__main__":
     unittest.main()
